@@ -1,6 +1,6 @@
 # Power System Stability Analysis Framework
 
-This framework provides a comprehensive set of tools for performing power system stability analysis using the ANDES (Advanced Network Dynamic Extension for Simulations) package. It includes modules for loading IEEE test systems, modifying network topology, and performing various types of stability assessments.
+This framework provides a comprehensive set of tools for performing power system stability analysis using the ANDES (Advanced Network Dynamic Extension for Simulations) package alongside the use of Dynawo package. It includes modules for loading IEEE test systems, modifying network topology, and performing various types of stability assessments.
 
 ## Features
 
