@@ -1,188 +1,147 @@
 """
-Module for loading IEEE 68-bus and IEEE 300-bus test systems in Dynawo.
+Module for loading IEEE 68-bus and IEEE 300-bus test systems in ANDES.
 """
 
 import os
-import dynawo
+import andes
+import logging
 import numpy as np
+from andes.utils.paths import get_case
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class IEEESystemLoader:
-    """Class to load standard IEEE test systems for Dynawo simulations."""
+def load_ieee68():
+    """
+    Load the IEEE 68-bus (New England/New York) system.
     
-    def __init__(self, dyd_path=None, par_path=None, iidm_path=None):
-        """
-        Initialize the IEEE system loader.
+    Returns:
+        andes.System: ANDES system object with the loaded IEEE 68-bus system
+    """
+    try:
+        # The IEEE 68-bus is also known as the NPCC system in ANDES
+        case_path = get_case('npcc/npcc.xlsx')
+        logger.info(f"Loading IEEE 68-bus system from {case_path}")
         
-        Args:
-            dyd_path: Path to the DYD (Dynawo Dynamic Data) files directory
-            par_path: Path to the PAR (Parameters) files directory
-            iidm_path: Path to the IIDM (iTesla Internal Data Model) files directory
-        """
-        self.dyd_path = dyd_path or os.environ.get('DYNAWO_DYD_PATH', './dyd')
-        self.par_path = par_path or os.environ.get('DYNAWO_PAR_PATH', './par')
-        self.iidm_path = iidm_path or os.environ.get('DYNAWO_IIDM_PATH', './iidm')
+        # Initialize ANDES system
+        system = andes.System()
+        system.config.default_config()
         
-    def load_ieee68(self, return_data=False):
-        """
-        Load the IEEE 68-bus (16-machine) system.
+        # Load the case
+        system.load_file(case_path)
+        logger.info(f"Successfully loaded IEEE 68-bus system with {system.Bus.n} buses")
         
-        Args:
-            return_data: If True, returns the loaded system data
-            
-        Returns:
-            A Dynawo simulation object with the IEEE 68-bus system loaded
-        """
-        print("Loading IEEE 68-bus system...")
-        
-        # Create a new simulation
-        simulation = dynawo.Simulation()
-        
-        # Define the paths to the necessary files
-        iidm_file = os.path.join(self.iidm_path, 'ieee68.iidm')
-        dyd_file = os.path.join(self.dyd_path, 'ieee68.dyd')
-        par_file = os.path.join(self.par_path, 'ieee68.par')
-        
-        # Load the network model
-        simulation.set_network_data(iidm_file)
-        
-        # Load the dynamic models
-        simulation.set_dynamic_data(dyd_file)
-        
-        # Load the parameters
-        simulation.set_parameters(par_file)
-        
-        # Set default simulation settings
-        simulation.set_time_step(0.01)  # 10ms time step
-        simulation.set_duration(20.0)   # 20 seconds simulation
-        
-        print("IEEE 68-bus system loaded successfully")
-        
-        if return_data:
-            return simulation, self._extract_system_data(simulation)
-        return simulation
+        return system
     
-    def load_ieee300(self, return_data=False):
-        """
-        Load the IEEE 300-bus system.
-        
-        Args:
-            return_data: If True, returns the loaded system data
-            
-        Returns:
-            A Dynawo simulation object with the IEEE 300-bus system loaded
-        """
-        print("Loading IEEE 300-bus system...")
-        
-        # Create a new simulation
-        simulation = dynawo.Simulation()
-        
-        # Define the paths to the necessary files
-        iidm_file = os.path.join(self.iidm_path, 'ieee300.iidm')
-        dyd_file = os.path.join(self.dyd_path, 'ieee300.dyd')
-        par_file = os.path.join(self.par_path, 'ieee300.par')
-        
-        # Load the network model
-        simulation.set_network_data(iidm_file)
-        
-        # Load the dynamic models
-        simulation.set_dynamic_data(dyd_file)
-        
-        # Load the parameters
-        simulation.set_parameters(par_file)
-        
-        # Set default simulation settings
-        simulation.set_time_step(0.01)  # 10ms time step
-        simulation.set_duration(20.0)   # 20 seconds simulation
-        
-        print("IEEE 300-bus system loaded successfully")
-        
-        if return_data:
-            return simulation, self._extract_system_data(simulation)
-        return simulation
+    except Exception as e:
+        logger.error(f"Failed to load IEEE 68-bus system: {str(e)}")
+        raise
+
+def load_ieee300():
+    """
+    Load the IEEE 300-bus test system.
     
-    def _extract_system_data(self, simulation):
-        """
-        Extract key data from the loaded system.
+    Returns:
+        andes.System: ANDES system object with the loaded IEEE 300-bus system
+    """
+    try:
+        # Get the IEEE 300-bus system path
+        case_path = get_case('ieee/ieee300.raw')
+        logger.info(f"Loading IEEE 300-bus system from {case_path}")
         
-        Args:
-            simulation: A Dynawo simulation object
-            
-        Returns:
-            Dictionary containing key system data
-        """
-        network = simulation.get_network()
+        # Initialize ANDES system
+        system = andes.System()
+        system.config.default_config()
         
-        data = {
-            'buses': [],
-            'generators': [],
-            'loads': [],
-            'lines': [],
-            'transformers': []
-        }
+        # Load the case
+        system.load_file(case_path)
+        logger.info(f"Successfully loaded IEEE 300-bus system with {system.Bus.n} buses")
         
-        # Extract bus data
-        for bus in network.get_buses():
-            data['buses'].append({
-                'id': bus.get_id(),
-                'voltage': bus.get_v(),
-                'angle': bus.get_angle(),
-                'v_nom': bus.get_v_nom()
-            })
-        
-        # Extract generator data
-        for gen in network.get_generators():
-            data['generators'].append({
-                'id': gen.get_id(),
-                'bus_id': gen.get_bus_id(),
-                'p': gen.get_p(),
-                'q': gen.get_q(),
-                'p_max': gen.get_p_max(),
-                'q_max': gen.get_q_max(),
-                'q_min': gen.get_q_min()
-            })
-        
-        # Extract load data
-        for load in network.get_loads():
-            data['loads'].append({
-                'id': load.get_id(),
-                'bus_id': load.get_bus_id(),
-                'p': load.get_p(),
-                'q': load.get_q()
-            })
-        
-        # Extract line data
-        for line in network.get_lines():
-            data['lines'].append({
-                'id': line.get_id(),
-                'bus1_id': line.get_bus1_id(),
-                'bus2_id': line.get_bus2_id(),
-                'r': line.get_r(),
-                'x': line.get_x(),
-                'b': line.get_b(),
-                'rating': line.get_current_limit()
-            })
-        
-        # Extract transformer data
-        for transformer in network.get_transformers():
-            data['transformers'].append({
-                'id': transformer.get_id(),
-                'bus1_id': transformer.get_bus1_id(),
-                'bus2_id': transformer.get_bus2_id(),
-                'r': transformer.get_r(),
-                'x': transformer.get_x(),
-                'ratio': transformer.get_ratio()
-            })
-        
-        return data
+        return system
+    
+    except Exception as e:
+        logger.error(f"Failed to load IEEE 300-bus system: {str(e)}")
+        raise
 
+def load_custom_case(case_path):
+    """
+    Load a custom power system case from a specified file path.
+    
+    Args:
+        case_path (str): Path to the case file
+        
+    Returns:
+        andes.System: ANDES system object with the loaded system
+    """
+    try:
+        logger.info(f"Loading custom case from {case_path}")
+        
+        # Initialize ANDES system
+        system = andes.System()
+        system.config.default_config()
+        
+        # Load the case
+        system.load_file(case_path)
+        logger.info(f"Successfully loaded custom case with {system.Bus.n} buses")
+        
+        return system
+    
+    except Exception as e:
+        logger.error(f"Failed to load custom case: {str(e)}")
+        raise
 
-# Example usage
+def get_system_info(system):
+    """
+    Get summary information about the system.
+    
+    Args:
+        system (andes.System): ANDES system object
+        
+    Returns:
+        dict: Dictionary containing summary information
+    """
+    info = {
+        'n_buses': system.Bus.n,
+        'n_generators': system.GENROU.n if hasattr(system, 'GENROU') else 0,
+        'n_lines': system.Line.n,
+        'n_transformers': system.XFMR.n if hasattr(system, 'XFMR') else 0,
+        'n_loads': system.PQ.n if hasattr(system, 'PQ') else 0,
+        'total_gen_capacity_MW': np.sum(system.GENROU.Sn) if hasattr(system, 'GENROU') else 0,
+        'total_load_MW': np.sum(system.PQ.p0) if hasattr(system, 'PQ') else 0
+    }
+    
+    return info
+
+def save_system(system, output_path):
+    """
+    Save the system to a specified file path.
+    
+    Args:
+        system (andes.System): ANDES system object
+        output_path (str): Path to save the case
+    """
+    try:
+        logger.info(f"Saving system to {output_path}")
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        system.save(output_path)
+        logger.info(f"Successfully saved system to {output_path}")
+    
+    except Exception as e:
+        logger.error(f"Failed to save system: {str(e)}")
+        raise
+
 if __name__ == "__main__":
-    loader = IEEESystemLoader()
+    # Example usage
+    ieee68 = load_ieee68()
+    ieee68_info = get_system_info(ieee68)
+    print("IEEE 68-bus system info:")
+    for key, value in ieee68_info.items():
+        print(f"  {key}: {value}")
     
-    # Load IEEE 68-bus system
-    sim68 = loader.load_ieee68()
-    
-    # Load IEEE 300-bus system
-    sim300 = loader.load_ieee300()
+    ieee300 = load_ieee300()
+    ieee300_info = get_system_info(ieee300)
+    print("\nIEEE 300-bus system info:")
+    for key, value in ieee300_info.items():
+        print(f"  {key}: {value}")
