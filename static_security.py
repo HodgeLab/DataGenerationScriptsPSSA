@@ -1,364 +1,344 @@
 """
-Module for performing static security assessment through power flows in Dynawo.
+Module for performing static security assessment through power flows in ANDES.
 """
 
-import dynawo
+import logging
 import numpy as np
 import pandas as pd
+from copy import deepcopy
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class StaticSecurityAssessor:
-    """Class to perform static security assessment in Dynawo power system models."""
+def run_power_flow(system):
+    """
+    Perform power flow analysis on an ANDES system.
     
-    def __init__(self, simulation):
-        """
-        Initialize the static security assessor.
+    Args:
+        system (andes.System): ANDES system object
         
-        Args:
-            simulation: A Dynawo simulation object
-        """
-        self.simulation = simulation
-        self.network = simulation.get_network()
-        self.results = None
-    
-    def run_power_flow(self):
-        """
-        Run a power flow analysis on the system.
+    Returns:
+        bool: True if power flow converged, False otherwise
+        dict: Power flow results and statistics
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        system_copy = deepcopy(system)
         
-        Returns:
-            True if the power flow converged, False otherwise
-        """
-        print("Running power flow analysis...")
+        # Set power flow settings
+        system_copy.PFlow.init()
+        system_copy.PFlow.config.flat_start = 0
+        system_copy.PFlow.config.max_iter = 30
+        system_copy.PFlow.config.tol = 1e-6
         
-        # Create a power flow solver
-        pf_solver = dynawo.PowerFlowSolver(self.network)
+        # Run power flow
+        system_copy.PFlow.run()
         
-        # Set power flow options
-        pf_solver.set_max_iterations(20)
-        pf_solver.set_tolerance(1e-6)
+        # Check convergence
+        converged = system_copy.PFlow.converged
         
-        # Run the power flow
-        converged = pf_solver.solve()
-        
-        if converged:
-            print("Power flow converged successfully")
-        else:
-            print("Power flow did not converge")
-        
-        return converged
-    
-    def calculate_overload_index(self, p=2, weights=None):
-        """
-        Calculate the overload index as per equation:
-        f_x = sum(w_i * (S_mean,i / S_max,i)^p)
-        
-        Args:
-            p: Exponent for the index calculation (default: 2)
-            weights: Optional weights for each line (default: equal weights)
-            
-        Returns:
-            The calculated overload index value
-        """
-        print("Calculating overload index...")
-        
-        # Run power flow if not already done
-        if not hasattr(self, '_pf_run') or not self._pf_run:
-            converged = self.run_power_flow()
-            if not converged:
-                print("Cannot calculate overload index - power flow did not converge")
-                return None
-            self._pf_run = True
-        
-        # Get all lines
-        lines = list(self.network.get_lines())
-        n_lines = len(lines)
-        
-        # Set default weights if not provided
-        if weights is None:
-            weights = np.ones(n_lines) / n_lines
-        elif len(weights) != n_lines:
-            print(f"Warning: Number of weights ({len(weights)}) does not match number of lines ({n_lines})")
-            weights = np.ones(n_lines) / n_lines
-        
-        # Calculate the overload index
-        overload_index = 0.0
-        line_indices = []
-        
-        for i, line in enumerate(lines):
-            if not line.is_connected():
-                continue
-                
-            # Get apparent power flow and rating
-            p_from = line.get_p_from()
-            q_from = line.get_q_from()
-            s_mean = np.sqrt(p_from**2 + q_from**2)
-            s_max = line.get_current_limit() * line.get_v_from()  # S = V * I
-            
-            if s_max <= 0:
-                print(f"Warning: Line {line.get_id()} has zero or negative rating. Skipping.")
-                continue
-            
-            # Calculate term for this line
-            line_term = weights[i] * (s_mean / s_max) ** p
-            overload_index += line_term
-            
-            # Store individual line index
-            line_indices.append({
-                'line_id': line.get_id(),
-                'from_bus': line.get_bus1_id(),
-                'to_bus': line.get_bus2_id(),
-                's_mean': s_mean,
-                's_max': s_max,
-                'loading_percent': (s_mean / s_max) * 100,
-                'term_value': line_term
-            })
-        
-        # Store results
-        self.results = {
-            'overload_index': overload_index,
-            'line_indices': pd.DataFrame(line_indices).sort_values(by='loading_percent', ascending=False)
+        # Get results
+        results = {
+            'converged': converged,
+            'iterations': system_copy.PFlow.niter,
+            'error': system_copy.PFlow.mis,
+            'elapsed_time': system_copy.PFlow.t_total
         }
         
-        print(f"Overload index: {overload_index:.4f}")
-        return overload_index
+        if converged:
+            logger.info(f"Power flow converged in {results['iterations']} iterations")
+        else:
+            logger.warning(f"Power flow did not converge after {results['iterations']} iterations")
+        
+        return converged, results, system_copy
     
-    def identify_critical_lines(self, threshold_percent=90):
-        """
-        Identify lines that are critically loaded.
-        
-        Args:
-            threshold_percent: Loading percentage threshold to consider a line critical
-            
-        Returns:
-            DataFrame containing the critical lines
-        """
-        if self.results is None:
-            self.calculate_overload_index()
-        
-        critical_lines = self.results['line_indices'][
-            self.results['line_indices']['loading_percent'] >= threshold_percent
-        ]
-        
-        print(f"Found {len(critical_lines)} critical lines loaded above {threshold_percent}%")
-        return critical_lines
+    except Exception as e:
+        logger.error(f"Failed to run power flow: {str(e)}")
+        raise
+
+def calculate_line_loadings(system, mva_base=100.0):
+    """
+    Calculate loading percentage for all lines in the system.
     
-    def check_voltage_violations(self, v_min=0.95, v_max=1.05):
-        """
-        Check for voltage violations in the system.
+    Args:
+        system (andes.System): ANDES system with solved power flow
+        mva_base (float): System MVA base
         
-        Args:
-            v_min: Minimum acceptable voltage in p.u.
-            v_max: Maximum acceptable voltage in p.u.
+    Returns:
+        pd.DataFrame: DataFrame with line loading information
+    """
+    try:
+        # Check if power flow was run
+        if not hasattr(system, 'f') or not hasattr(system.f, 'Line'):
+            raise ValueError("Power flow solution not available. Run power flow first.")
+        
+        line_data = []
+        
+        # Calculate complex power flow for each line
+        for i in range(system.Line.n):
+            from_bus = system.Line.bus1[i]
+            to_bus = system.Line.bus2[i]
             
-        Returns:
-            DataFrame containing buses with voltage violations
-        """
-        # Run power flow if not already done
-        if not hasattr(self, '_pf_run') or not self._pf_run:
-            converged = self.run_power_flow()
-            if not converged:
-                print("Cannot check voltage violations - power flow did not converge")
-                return None
-            self._pf_run = True
+            # Get line flow in complex power
+            s_from = complex(system.f.Line.pf[i], system.f.Line.qf[i]) * mva_base
+            s_to = complex(system.f.Line.pt[i], system.f.Line.qt[i]) * mva_base
+            
+            # Calculate apparent power magnitude at both ends
+            s_from_mag = abs(s_from)
+            s_to_mag = abs(s_to)
+            s_max = max(s_from_mag, s_to_mag)
+            
+            # Calculate loading percentage
+            rating = system.Line.rate_a[i] * mva_base
+            if rating > 0:
+                loading_percent = 100 * s_max / rating
+            else:
+                loading_percent = 0  # No rating specified
+            
+            line_name = system.Line.name[i] if system.Line.name[i] else f"Line_{i}"
+            
+            line_data.append({
+                'line_idx': i,
+                'line_name': line_name,
+                'from_bus': from_bus,
+                'to_bus': to_bus,
+                'p_from_mw': system.f.Line.pf[i] * mva_base,
+                'q_from_mvar': system.f.Line.qf[i] * mva_base,
+                's_from_mva': s_from_mag,
+                'p_to_mw': system.f.Line.pt[i] * mva_base,
+                'q_to_mvar': system.f.Line.qt[i] * mva_base,
+                's_to_mva': s_to_mag,
+                's_max_mva': s_max,
+                'rating_mva': rating,
+                'loading_percent': loading_percent
+            })
+        
+        return pd.DataFrame(line_data)
+    
+    except Exception as e:
+        logger.error(f"Failed to calculate line loadings: {str(e)}")
+        raise
+
+def calculate_overload_index(system, p=2, weight_factor=1.0, mva_base=100.0):
+    """
+    Calculate the overload performance index as defined in the equation:
+    f_x = sum(wf_i * (S_mean,i / S_max,i)^p) for all lines
+    
+    Args:
+        system (andes.System): ANDES system with solved power flow
+        p (int): Power factor in the overload index formula
+        weight_factor (float): Weight factor for all lines
+        mva_base (float): System MVA base
+        
+    Returns:
+        float: Overload performance index
+        pd.DataFrame: DataFrame with line-wise overload indices
+    """
+    try:
+        # Get line loadings
+        line_loadings = calculate_line_loadings(system, mva_base)
+        
+        # Calculate mean apparent power for each line
+        line_loadings['s_mean_mva'] = (line_loadings['s_from_mva'] + line_loadings['s_to_mva']) / 2
+        
+        # Calculate line-wise indices
+        line_indices = []
+        total_index = 0.0
+        
+        for _, line in line_loadings.iterrows():
+            if line['rating_mva'] > 0:
+                # Calculate the term (S_mean / S_max)^p
+                term = (line['s_mean_mva'] / line['rating_mva']) ** p
+                # Apply weight factor
+                weighted_term = weight_factor * term
+                
+                line_indices.append({
+                    'line_idx': line['line_idx'],
+                    'line_name': line['line_name'],
+                    's_mean_mva': line['s_mean_mva'],
+                    'rating_mva': line['rating_mva'],
+                    'term': term,
+                    'weighted_term': weighted_term
+                })
+                
+                total_index += weighted_term
+        
+        line_indices_df = pd.DataFrame(line_indices)
+        
+        logger.info(f"Calculated overload index: {total_index:.4f}")
+        return total_index, line_indices_df
+    
+    except Exception as e:
+        logger.error(f"Failed to calculate overload index: {str(e)}")
+        raise
+
+def check_voltage_violations(system, v_min=0.95, v_max=1.05):
+    """
+    Check for bus voltage violations.
+    
+    Args:
+        system (andes.System): ANDES system with solved power flow
+        v_min (float): Minimum acceptable voltage in p.u.
+        v_max (float): Maximum acceptable voltage in p.u.
+        
+    Returns:
+        pd.DataFrame: DataFrame with voltage violation information
+    """
+    try:
+        # Check if power flow was run
+        if not hasattr(system, 'f') or not hasattr(system.f, 'Bus'):
+            raise ValueError("Power flow solution not available. Run power flow first.")
         
         violations = []
         
-        for bus in self.network.get_buses():
-            if not bus.is_connected():
-                continue
-                
-            v = bus.get_v() / bus.get_v_nom()  # Convert to p.u.
+        for i in range(system.Bus.n):
+            v_magnitude = abs(system.f.Bus.v[i])
             
-            if v < v_min or v > v_max:
+            if v_magnitude < v_min or v_magnitude > v_max:
+                bus_name = system.Bus.name[i] if system.Bus.name[i] else f"Bus_{i}"
                 violations.append({
-                    'bus_id': bus.get_id(),
-                    'voltage_pu': v,
-                    'violation': 'Low' if v < v_min else 'High',
-                    'deviation': min(abs(v - v_min), abs(v - v_max))
+                    'bus_idx': i,
+                    'bus_name': bus_name,
+                    'voltage_pu': v_magnitude,
+                    'violation_type': 'Low' if v_magnitude < v_min else 'High',
+                    'deviation': abs(v_magnitude - (v_min if v_magnitude < v_min else v_max))
                 })
         
-        df_violations = pd.DataFrame(violations).sort_values(by='deviation', ascending=False)
+        violations_df = pd.DataFrame(violations)
         
-        print(f"Found {len(df_violations)} buses with voltage violations")
-        return df_violations
+        if len(violations) > 0:
+            logger.warning(f"Found {len(violations)} voltage violations")
+        else:
+            logger.info("No voltage violations found")
+        
+        return violations_df
     
-    def get_branch_flows(self):
-        """
-        Get power flows on all branches.
-        
-        Returns:
-            DataFrame containing branch flow information
-        """
-        # Run power flow if not already done
-        if not hasattr(self, '_pf_run') or not self._pf_run:
-            converged = self.run_power_flow()
-            if not converged:
-                print("Cannot get branch flows - power flow did not converge")
-                return None
-            self._pf_run = True
-        
-        branch_flows = []
-        
-        # Get line flows
-        for line in self.network.get_lines():
-            if not line.is_connected():
-                continue
-                
-            p_from = line.get_p_from()
-            q_from = line.get_q_from()
-            s_from = np.sqrt(p_from**2 + q_from**2)
-            
-            p_to = line.get_p_to()
-            q_to = line.get_q_to()
-            s_to = np.sqrt(p_to**2 + q_to**2)
-            
-            s_max = line.get_current_limit() * line.get_v_from()
-            loading = (max(s_from, s_to) / s_max) * 100 if s_max > 0 else 0
-            
-            branch_flows.append({
-                'branch_id': line.get_id(),
-                'type': 'Line',
-                'from_bus': line.get_bus1_id(),
-                'to_bus': line.get_bus2_id(),
-                'p_from_mw': p_from,
-                'q_from_mvar': q_from,
-                's_from_mva': s_from,
-                'p_to_mw': p_to,
-                'q_to_mvar': q_to,
-                's_to_mva': s_to,
-                's_max_mva': s_max,
-                'loading_percent': loading
-            })
-        
-        # Get transformer flows
-        for transformer in self.network.get_transformers():
-            if not transformer.is_connected():
-                continue
-                
-            p_from = transformer.get_p_from()
-            q_from = transformer.get_q_from()
-            s_from = np.sqrt(p_from**2 + q_from**2)
-            
-            p_to = transformer.get_p_to()
-            q_to = transformer.get_q_to()
-            s_to = np.sqrt(p_to**2 + q_to**2)
-            
-            s_max = transformer.get_current_limit() * transformer.get_v_from() if hasattr(transformer, 'get_current_limit') else 0
-            loading = (max(s_from, s_to) / s_max) * 100 if s_max > 0 else 0
-            
-            branch_flows.append({
-                'branch_id': transformer.get_id(),
-                'type': 'Transformer',
-                'from_bus': transformer.get_bus1_id(),
-                'to_bus': transformer.get_bus2_id(),
-                'p_from_mw': p_from,
-                'q_from_mvar': q_from,
-                's_from_mva': s_from,
-                'p_to_mw': p_to,
-                'q_to_mvar': q_to,
-                's_to_mva': s_to,
-                's_max_mva': s_max,
-                'loading_percent': loading
-            })
-        
-        return pd.DataFrame(branch_flows).sort_values(by='loading_percent', ascending=False)
+    except Exception as e:
+        logger.error(f"Failed to check voltage violations: {str(e)}")
+        raise
+
+def perform_static_security_assessment(system, line_outages=None, v_min=0.95, v_max=1.05, p=2):
+    """
+    Perform comprehensive static security assessment including N-1 contingency analysis.
     
-    def get_bus_voltages(self):
-        """
-        Get voltages at all buses.
+    Args:
+        system (andes.System): ANDES system object
+        line_outages (list, optional): List of line indices to analyze as contingencies
+                                       If None, all lines will be considered
+        v_min (float): Minimum acceptable voltage in p.u.
+        v_max (float): Maximum acceptable voltage in p.u.
+        p (int): Power factor in the overload index formula
         
-        Returns:
-            DataFrame containing bus voltage information
-        """
-        # Run power flow if not already done
-        if not hasattr(self, '_pf_run') or not self._pf_run:
-            converged = self.run_power_flow()
-            if not converged:
-                print("Cannot get bus voltages - power flow did not converge")
-                return None
-            self._pf_run = True
+    Returns:
+        dict: Dictionary with assessment results
+    """
+    try:
+        # Run base case power flow
+        logger.info("Running base case power flow")
+        base_converged, base_results, base_solved = run_power_flow(system)
         
-        bus_voltages = []
+        if not base_converged:
+            logger.error("Base case power flow did not converge")
+            return {
+                'base_case_converged': False,
+                'overall_secure': False,
+                'reason': 'Base case power flow did not converge'
+            }
         
-        for bus in self.network.get_buses():
-            if not bus.is_connected():
-                continue
+        # Calculate base case indices
+        base_loadings = calculate_line_loadings(base_solved)
+        base_overload_idx, base_overload_details = calculate_overload_index(base_solved, p=p)
+        base_voltage_violations = check_voltage_violations(base_solved, v_min, v_max)
+        
+        # Determine if line outages were specified or use all lines
+        if line_outages is None:
+            line_outages = list(range(system.Line.n))
+        
+        # Perform N-1 contingency analysis
+        logger.info(f"Performing N-1 contingency analysis for {len(line_outages)} line outages")
+        
+        contingency_results = []
+        
+        for line_idx in line_outages:
+            # Create a modified system with the line outage
+            from topology_changes import disconnect_line
+            
+            logger.info(f"Analyzing contingency: Line outage {line_idx}")
+            contingency_system = disconnect_line(system, line_idx)
+            
+            # Run power flow for this contingency
+            cont_converged, cont_results, cont_solved = run_power_flow(contingency_system)
+            
+            if cont_converged:
+                # Calculate indices for this contingency
+                cont_loadings = calculate_line_loadings(cont_solved)
+                cont_overload_idx, _ = calculate_overload_index(cont_solved, p=p)
+                cont_voltage_violations = check_voltage_violations(cont_solved, v_min, v_max)
                 
-            v = bus.get_v()
-            v_nom = bus.get_v_nom()
-            v_pu = v / v_nom
-            angle = bus.get_angle()
-            
-            bus_voltages.append({
-                'bus_id': bus.get_id(),
-                'voltage_kv': v,
-                'voltage_pu': v_pu,
-                'angle_deg': angle,
-                'v_nom_kv': v_nom
-            })
+                # Check for overloaded lines (>100% loading)
+                overloaded_lines = cont_loadings[cont_loadings['loading_percent'] > 100]
+                
+                contingency_results.append({
+                    'contingency_type': 'line_outage',
+                    'element_idx': line_idx,
+                    'converged': cont_converged,
+                    'overload_index': cont_overload_idx,
+                    'voltage_violations': len(cont_voltage_violations),
+                    'overloaded_lines': len(overloaded_lines),
+                    'secure': len(overloaded_lines) == 0 and len(cont_voltage_violations) == 0
+                })
+            else:
+                contingency_results.append({
+                    'contingency_type': 'line_outage',
+                    'element_idx': line_idx,
+                    'converged': cont_converged,
+                    'secure': False,
+                    'reason': 'Power flow did not converge'
+                })
         
-        return pd.DataFrame(bus_voltages).sort_values(by='voltage_pu')
-    
-    def assess_static_security(self, overload_threshold=90, v_min=0.95, v_max=1.05):
-        """
-        Perform a complete static security assessment.
+        # Compile overall security assessment
+        contingency_df = pd.DataFrame(contingency_results)
+        secure_contingencies = contingency_df[contingency_df['secure'] == True]
         
-        Args:
-            overload_threshold: Line loading percentage threshold
-            v_min: Minimum acceptable voltage in p.u.
-            v_max: Maximum acceptable voltage in p.u.
-            
-        Returns:
-            Dictionary containing assessment results
-        """
-        print("Performing static security assessment...")
+        # System is secure if all contingencies are secure
+        overall_secure = len(secure_contingencies) == len(contingency_df)
         
-        # Run power flow
-        converged = self.run_power_flow()
-        if not converged:
-            return {'converged': False, 'secure': False, 'message': 'Power flow did not converge'}
-        
-        # Calculate overload index
-        overload_index = self.calculate_overload_index()
-        
-        # Check for critical lines
-        critical_lines = self.identify_critical_lines(overload_threshold)
-        
-        # Check for voltage violations
-        voltage_violations = self.check_voltage_violations(v_min, v_max)
-        
-        # Determine if the system is secure
-        is_secure = (len(critical_lines) == 0) and (len(voltage_violations) == 0)
-        
-        # Compile results
-        assessment = {
-            'converged': converged,
-            'secure': is_secure,
-            'overload_index': overload_index,
-            'critical_lines': critical_lines,
-            'voltage_violations': voltage_violations,
-            'branch_flows': self.get_branch_flows(),
-            'bus_voltages': self.get_bus_voltages()
+        assessment_results = {
+            'base_case_converged': base_converged,
+            'base_overload_index': base_overload_idx,
+            'base_voltage_violations': len(base_voltage_violations),
+            'overall_secure': overall_secure,
+            'total_contingencies': len(contingency_df),
+            'secure_contingencies': len(secure_contingencies),
+            'contingency_details': contingency_df.to_dict('records'),
+            'base_case_line_loadings': base_loadings.to_dict('records'),
+            'base_case_voltage_violations': base_voltage_violations.to_dict('records') if len(base_voltage_violations) > 0 else []
         }
         
-        if is_secure:
-            print("System is statically secure")
-        else:
-            print("System is statically insecure")
-            if len(critical_lines) > 0:
-                print(f"  - {len(critical_lines)} lines loaded above {overload_threshold}%")
-            if len(voltage_violations) > 0:
-                print(f"  - {len(voltage_violations)} buses with voltage violations")
-        
-        return assessment
+        logger.info(f"Static security assessment complete. System is {'secure' if overall_secure else 'insecure'}")
+        return assessment_results
+    
+    except Exception as e:
+        logger.error(f"Failed to perform static security assessment: {str(e)}")
+        raise
 
-
-# Example usage
 if __name__ == "__main__":
-    # This requires a simulation object to be created first
-    # from load_ieee_systems import IEEESystemLoader
-    # loader = IEEESystemLoader()
-    # sim = loader.load_ieee68()
-    # assessor = StaticSecurityAssessor(sim)
-    # results = assessor.assess_static_security()
-    pass
+    # Example usage
+    import load_ieee_system
+    
+    # Load IEEE 68-bus system
+    system = load_ieee_system.load_ieee68()
+    
+    # Run static security assessment for a few line outages
+    line_outages = list(range(5))  # First 5 lines
+    assessment = perform_static_security_assessment(system, line_outages, v_min=0.9, v_max=1.1)
+    
+    # Print summary
+    print("\nStatic Security Assessment Summary:")
+    print(f"Base case converged: {assessment['base_case_converged']}")
+    print(f"Base overload index: {assessment['base_overload_index']:.4f}")
+    print(f"Base voltage violations: {assessment['base_voltage_violations']}")
+    print(f"System secure under N-1 contingencies: {assessment['overall_secure']}")
+    print(f"Total contingencies analyzed: {assessment['total_contingencies']}")
+    print(f"Secure contingencies: {assessment['secure_contingencies']}")
