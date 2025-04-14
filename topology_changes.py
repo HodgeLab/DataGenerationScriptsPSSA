@@ -1,306 +1,306 @@
 """
-Module for performing topological changes in Dynawo power system models.
+Module for performing topological changes to power systems in ANDES.
 """
 
-import dynawo
+import logging
 import numpy as np
+import pandas as pd
+from copy import deepcopy
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class TopologyModifier:
-    """Class to modify the topology of power system models in Dynawo."""
+def modify_line_capacity(system, line_idx, new_capacity_mva):
+    """
+    Modify the capacity of a transmission line.
     
-    def __init__(self, simulation):
-        """
-        Initialize the topology modifier.
+    Args:
+        system (andes.System): ANDES system object
+        line_idx (int or str): Line index or name
+        new_capacity_mva (float): New line capacity in MVA
         
-        Args:
-            simulation: A Dynawo simulation object
-        """
-        self.simulation = simulation
-        self.network = simulation.get_network()
-        self.original_state = self._save_current_state()
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
         
-    def _save_current_state(self):
-        """
-        Save the current state of the network topology.
+        # Convert line_idx to int if it's a string identifier
+        if isinstance(line_idx, str):
+            line_idx = system.Line.idx2uid(line_idx)
         
-        Returns:
-            Dictionary containing the current network state
-        """
-        state = {
-            'lines': {},
-            'transformers': {},
-            'generators': {},
-            'buses': {}
-        }
+        # Update the line rating
+        modified_system.Line.rate_a[line_idx] = new_capacity_mva
         
-        # Save line states
-        for line in self.network.get_lines():
-            line_id = line.get_id()
-            state['lines'][line_id] = {
-                'status': line.is_connected(),
-                'r': line.get_r(),
-                'x': line.get_x(),
-                'b': line.get_b(),
-                'rating': line.get_current_limit()
-            }
-        
-        # Save transformer states
-        for transformer in self.network.get_transformers():
-            transformer_id = transformer.get_id()
-            state['transformers'][transformer_id] = {
-                'status': transformer.is_connected(),
-                'r': transformer.get_r(),
-                'x': transformer.get_x(),
-                'ratio': transformer.get_ratio()
-            }
-        
-        # Save generator states
-        for generator in self.network.get_generators():
-            generator_id = generator.get_id()
-            state['generators'][generator_id] = {
-                'status': generator.is_connected(),
-                'p': generator.get_p(),
-                'q': generator.get_q()
-            }
-        
-        # Save bus states
-        for bus in self.network.get_buses():
-            bus_id = bus.get_id()
-            state['buses'][bus_id] = {
-                'status': bus.is_connected()
-            }
-        
-        return state
+        logger.info(f"Modified line {line_idx} capacity to {new_capacity_mva} MVA")
+        return modified_system
     
-    def restore_original_topology(self):
-        """
-        Restore the network to its original topology.
-        """
-        print("Restoring original network topology...")
-        
-        # Restore line states
-        for line_id, state in self.original_state['lines'].items():
-            line = self.network.get_line(line_id)
-            if line.is_connected() != state['status']:
-                if state['status']:
-                    line.connect()
-                else:
-                    line.disconnect()
-            line.set_r(state['r'])
-            line.set_x(state['x'])
-            line.set_b(state['b'])
-            line.set_current_limit(state['rating'])
-        
-        # Restore transformer states
-        for transformer_id, state in self.original_state['transformers'].items():
-            transformer = self.network.get_transformer(transformer_id)
-            if transformer.is_connected() != state['status']:
-                if state['status']:
-                    transformer.connect()
-                else:
-                    transformer.disconnect()
-            transformer.set_r(state['r'])
-            transformer.set_x(state['x'])
-            transformer.set_ratio(state['ratio'])
-        
-        # Restore generator states
-        for generator_id, state in self.original_state['generators'].items():
-            generator = self.network.get_generator(generator_id)
-            if generator.is_connected() != state['status']:
-                if state['status']:
-                    generator.connect()
-                else:
-                    generator.disconnect()
-            generator.set_p(state['p'])
-            generator.set_q(state['q'])
-        
-        # Restore bus states
-        for bus_id, state in self.original_state['buses'].items():
-            bus = self.network.get_bus(bus_id)
-            if bus.is_connected() != state['status']:
-                if state['status']:
-                    bus.connect()
-                else:
-                    bus.disconnect()
-        
-        print("Original topology restored")
-    
-    def disconnect_line(self, line_id):
-        """
-        Disconnect a transmission line.
-        
-        Args:
-            line_id: ID of the line to disconnect
-        """
-        line = self.network.get_line(line_id)
-        if line.is_connected():
-            print(f"Disconnecting line {line_id}")
-            line.disconnect()
-        else:
-            print(f"Line {line_id} is already disconnected")
-    
-    def connect_line(self, line_id):
-        """
-        Connect a transmission line.
-        
-        Args:
-            line_id: ID of the line to connect
-        """
-        line = self.network.get_line(line_id)
-        if not line.is_connected():
-            print(f"Connecting line {line_id}")
-            line.connect()
-        else:
-            print(f"Line {line_id} is already connected")
-    
-    def modify_line_parameters(self, line_id, r=None, x=None, b=None, rating=None):
-        """
-        Modify parameters of a transmission line.
-        
-        Args:
-            line_id: ID of the line to modify
-            r: New resistance value (ohms)
-            x: New reactance value (ohms)
-            b: New susceptance value (siemens)
-            rating: New current rating (amperes)
-        """
-        line = self.network.get_line(line_id)
-        
-        if r is not None:
-            line.set_r(r)
-        
-        if x is not None:
-            line.set_x(x)
-        
-        if b is not None:
-            line.set_b(b)
-        
-        if rating is not None:
-            line.set_current_limit(rating)
-        
-        print(f"Modified parameters of line {line_id}")
-    
-    def disconnect_transformer(self, transformer_id):
-        """
-        Disconnect a transformer.
-        
-        Args:
-            transformer_id: ID of the transformer to disconnect
-        """
-        transformer = self.network.get_transformer(transformer_id)
-        if transformer.is_connected():
-            print(f"Disconnecting transformer {transformer_id}")
-            transformer.disconnect()
-        else:
-            print(f"Transformer {transformer_id} is already disconnected")
-    
-    def connect_transformer(self, transformer_id):
-        """
-        Connect a transformer.
-        
-        Args:
-            transformer_id: ID of the transformer to connect
-        """
-        transformer = self.network.get_transformer(transformer_id)
-        if not transformer.is_connected():
-            print(f"Connecting transformer {transformer_id}")
-            transformer.connect()
-        else:
-            print(f"Transformer {transformer_id} is already connected")
-    
-    def change_transformer_tap(self, transformer_id, new_ratio):
-        """
-        Change the tap ratio of a transformer.
-        
-        Args:
-            transformer_id: ID of the transformer
-            new_ratio: New tap ratio value
-        """
-        transformer = self.network.get_transformer(transformer_id)
-        transformer.set_ratio(new_ratio)
-        print(f"Changed tap ratio of transformer {transformer_id} to {new_ratio}")
-    
-    def disconnect_bus(self, bus_id):
-        """
-        Disconnect a bus.
-        
-        Args:
-            bus_id: ID of the bus to disconnect
-        """
-        bus = self.network.get_bus(bus_id)
-        if bus.is_connected():
-            print(f"Disconnecting bus {bus_id}")
-            bus.disconnect()
-        else:
-            print(f"Bus {bus_id} is already disconnected")
-    
-    def connect_bus(self, bus_id):
-        """
-        Connect a bus.
-        
-        Args:
-            bus_id: ID of the bus to connect
-        """
-        bus = self.network.get_bus(bus_id)
-        if not bus.is_connected():
-            print(f"Connecting bus {bus_id}")
-            bus.connect()
-        else:
-            print(f"Bus {bus_id} is already connected")
-    
-    def change_line_capacity(self, line_id, new_rating):
-        """
-        Change the capacity (current rating) of a transmission line.
-        
-        Args:
-            line_id: ID of the line to modify
-            new_rating: New current rating (amperes)
-        """
-        line = self.network.get_line(line_id)
-        old_rating = line.get_current_limit()
-        line.set_current_limit(new_rating)
-        print(f"Changed rating of line {line_id} from {old_rating} A to {new_rating} A")
-    
-    def get_all_line_ids(self):
-        """
-        Get IDs of all lines in the network.
-        
-        Returns:
-            List of line IDs
-        """
-        return [line.get_id() for line in self.network.get_lines()]
-    
-    def get_all_transformer_ids(self):
-        """
-        Get IDs of all transformers in the network.
-        
-        Returns:
-            List of transformer IDs
-        """
-        return [transformer.get_id() for transformer in self.network.get_transformers()]
-    
-    def get_all_bus_ids(self):
-        """
-        Get IDs of all buses in the network.
-        
-        Returns:
-            List of bus IDs
-        """
-        return [bus.get_id() for bus in self.network.get_buses()]
+    except Exception as e:
+        logger.error(f"Failed to modify line capacity: {str(e)}")
+        raise
 
+def disconnect_line(system, line_idx):
+    """
+    Disconnect a transmission line from the system.
+    
+    Args:
+        system (andes.System): ANDES system object
+        line_idx (int or str): Line index or name
+        
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
+        
+        # Convert line_idx to int if it's a string identifier
+        if isinstance(line_idx, str):
+            line_idx = system.Line.idx2uid(line_idx)
+        
+        # Set line status to 0 (disconnected)
+        modified_system.Line.u[line_idx] = 0
+        
+        logger.info(f"Disconnected line {line_idx}")
+        return modified_system
+    
+    except Exception as e:
+        logger.error(f"Failed to disconnect line: {str(e)}")
+        raise
 
-# Example usage
+def connect_line(system, line_idx):
+    """
+    Connect a previously disconnected transmission line.
+    
+    Args:
+        system (andes.System): ANDES system object
+        line_idx (int or str): Line index or name
+        
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
+        
+        # Convert line_idx to int if it's a string identifier
+        if isinstance(line_idx, str):
+            line_idx = system.Line.idx2uid(line_idx)
+        
+        # Set line status to 1 (connected)
+        modified_system.Line.u[line_idx] = 1
+        
+        logger.info(f"Connected line {line_idx}")
+        return modified_system
+    
+    except Exception as e:
+        logger.error(f"Failed to connect line: {str(e)}")
+        raise
+
+def modify_line_impedance(system, line_idx, new_r=None, new_x=None, new_b=None):
+    """
+    Modify the impedance parameters of a transmission line.
+    
+    Args:
+        system (andes.System): ANDES system object
+        line_idx (int or str): Line index or name
+        new_r (float, optional): New resistance value in p.u.
+        new_x (float, optional): New reactance value in p.u.
+        new_b (float, optional): New susceptance value in p.u.
+        
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
+        
+        # Convert line_idx to int if it's a string identifier
+        if isinstance(line_idx, str):
+            line_idx = system.Line.idx2uid(line_idx)
+        
+        # Update impedance parameters if provided
+        if new_r is not None:
+            modified_system.Line.r[line_idx] = new_r
+        
+        if new_x is not None:
+            modified_system.Line.x[line_idx] = new_x
+        
+        if new_b is not None:
+            modified_system.Line.b[line_idx] = new_b
+        
+        logger.info(f"Modified line {line_idx} impedance parameters")
+        return modified_system
+    
+    except Exception as e:
+        logger.error(f"Failed to modify line impedance: {str(e)}")
+        raise
+
+def disconnect_bus(system, bus_idx):
+    """
+    Disconnect a bus by disconnecting all its connected elements.
+    
+    Args:
+        system (andes.System): ANDES system object
+        bus_idx (int or str): Bus index or name
+        
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
+        
+        # Convert bus_idx to int if it's a string identifier
+        if isinstance(bus_idx, str):
+            bus_idx = system.Bus.idx2uid(bus_idx)
+        
+        # Get the lines connected to this bus
+        connected_lines = []
+        for i in range(modified_system.Line.n):
+            if modified_system.Line.bus1[i] == bus_idx or modified_system.Line.bus2[i] == bus_idx:
+                connected_lines.append(i)
+        
+        # Disconnect all lines connected to this bus
+        for line_idx in connected_lines:
+            modified_system.Line.u[line_idx] = 0
+        
+        # Set all generators at this bus to 0
+        if hasattr(modified_system, 'GENROU'):
+            for i in range(modified_system.GENROU.n):
+                if modified_system.GENROU.bus[i] == bus_idx:
+                    modified_system.GENROU.u[i] = 0
+        
+        # Set all loads at this bus to 0
+        if hasattr(modified_system, 'PQ'):
+            for i in range(modified_system.PQ.n):
+                if modified_system.PQ.bus[i] == bus_idx:
+                    modified_system.PQ.u[i] = 0
+        
+        logger.info(f"Disconnected bus {bus_idx} and all connected elements")
+        return modified_system
+    
+    except Exception as e:
+        logger.error(f"Failed to disconnect bus: {str(e)}")
+        raise
+
+def add_shunt_compensation(system, bus_idx, mvar):
+    """
+    Add shunt compensation to a bus.
+    
+    Args:
+        system (andes.System): ANDES system object
+        bus_idx (int or str): Bus index or name
+        mvar (float): Reactive power compensation in MVAR (positive for capacitive)
+        
+    Returns:
+        andes.System: Modified ANDES system object
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        modified_system = deepcopy(system)
+        
+        # Convert bus_idx to int if it's a string identifier
+        if isinstance(bus_idx, str):
+            bus_idx = system.Bus.idx2uid(bus_idx)
+        
+        # Check if there's an existing shunt at this bus
+        existing_shunt_idx = None
+        if hasattr(modified_system, 'Shunt'):
+            for i in range(modified_system.Shunt.n):
+                if modified_system.Shunt.bus[i] == bus_idx:
+                    existing_shunt_idx = i
+                    break
+        
+        # Modify existing shunt or add a new one
+        if existing_shunt_idx is not None:
+            modified_system.Shunt.g[existing_shunt_idx] = 0  # Assuming only reactive compensation
+            modified_system.Shunt.b[existing_shunt_idx] = mvar / 100  # Convert to p.u.
+            logger.info(f"Modified existing shunt at bus {bus_idx} to {mvar} MVAR")
+        else:
+            # Add a new shunt device - this requires adding a new element
+            # Note: This is a simplified approach and might need adjustment based on ANDES version
+            if hasattr(modified_system, 'Shunt'):
+                modified_system.Shunt.add(idx=f"SHUNT_{bus_idx}", name=f"SHUNT_{bus_idx}", 
+                                         bus=bus_idx, g=0, b=mvar/100)
+                logger.info(f"Added new shunt compensation at bus {bus_idx} with {mvar} MVAR")
+            else:
+                logger.warning("Shunt model not available in the system")
+        
+        return modified_system
+    
+    except Exception as e:
+        logger.error(f"Failed to add shunt compensation: {str(e)}")
+        raise
+
+def get_topology_changes_list(system):
+    """
+    Generate a list of possible topology changes for the system.
+    
+    Args:
+        system (andes.System): ANDES system object
+        
+    Returns:
+        pd.DataFrame: DataFrame with possible topology changes
+    """
+    try:
+        topology_changes = []
+        
+        # Add line disconnections
+        for i in range(system.Line.n):
+            line_name = system.Line.name[i] if system.Line.name[i] else f"Line_{i}"
+            from_bus = system.Line.bus1[i]
+            to_bus = system.Line.bus2[i]
+            
+            topology_changes.append({
+                'change_type': 'disconnect_line',
+                'element_idx': i,
+                'element_name': line_name,
+                'description': f"Disconnect line from bus {from_bus} to bus {to_bus}"
+            })
+        
+        # Add line capacity modifications
+        for i in range(system.Line.n):
+            line_name = system.Line.name[i] if system.Line.name[i] else f"Line_{i}"
+            from_bus = system.Line.bus1[i]
+            to_bus = system.Line.bus2[i]
+            current_capacity = system.Line.rate_a[i]
+            
+            topology_changes.append({
+                'change_type': 'modify_line_capacity',
+                'element_idx': i,
+                'element_name': line_name,
+                'description': f"Modify capacity of line from bus {from_bus} to bus {to_bus}",
+                'current_value': current_capacity,
+                'new_value': current_capacity * 1.5  # Example: increase by 50%
+            })
+        
+        return pd.DataFrame(topology_changes)
+    
+    except Exception as e:
+        logger.error(f"Failed to generate topology changes list: {str(e)}")
+        raise
+
 if __name__ == "__main__":
-    # This requires a simulation object to be created first
-    # from load_ieee_systems import IEEESystemLoader
-    # loader = IEEESystemLoader()
-    # sim = loader.load_ieee68()
-    # topology = TopologyModifier(sim)
+    # Example usage (requires imported system)
+    import load_ieee_system
     
-    # Example operations:
-    # line_ids = topology.get_all_line_ids()
-    # topology.disconnect_line(line_ids[0])
-    # topology.change_line_capacity(line_ids[1], 1000)
-    # topology.restore_original_topology()
-    pass
+    # Load IEEE 68-bus system
+    system = load_ieee_system.load_ieee68()
+    
+    # Get possible topology changes
+    topology_df = get_topology_changes_list(system)
+    print(f"Generated {len(topology_df)} possible topology changes")
+    print(topology_df.head())
+    
+    # Example: Disconnect a line
+    if system.Line.n > 0:
+        modified_system = disconnect_line(system, 0)
+        
+        # Get system info after modification
+        mod_info = load_ieee_system.get_system_info(modified_system)
+        print("\nSystem after disconnecting line 0:")
+        for key, value in mod_info.items():
+            print(f"  {key}: {value}")
