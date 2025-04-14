@@ -1,487 +1,339 @@
 """
-Module for performing transient stability assessment in Dynawo.
+Module for performing transient stability analysis in ANDES.
 """
 
-import dynawo
+import logging
 import numpy as np
 import pandas as pd
+from copy import deepcopy
 import matplotlib.pyplot as plt
+from collections import defaultdict
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class TransientStabilityAnalyzer:
-    """Class to perform transient stability analysis in Dynawo power system models."""
+def run_transient_simulation(system, t_end=10.0, dt=0.01):
+    """
+    Run time-domain simulation for transient stability analysis.
     
-    def __init__(self, simulation):
-        """
-        Initialize the transient stability analyzer.
+    Args:
+        system (andes.System): ANDES system object with a solved power flow
+        t_end (float): End time for simulation in seconds
+        dt (float): Time step for simulation in seconds
         
-        Args:
-            simulation: A Dynawo simulation object
-        """
-        self.simulation = simulation
-        self.network = simulation.get_network()
-        self.results = None
-    
-    def apply_fault(self, fault_type, element_id, start_time=1.0, duration=0.1, **kwargs):
-        """
-        Apply a fault to the system.
+    Returns:
+        bool: True if simulation completed successfully, False otherwise
+        andes.System: System object with simulation results
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        system_copy = deepcopy(system)
         
-        Args:
-            fault_type: Type of fault ('bus_fault', 'line_trip', 'generator_trip', etc.)
-            element_id: ID of the element to apply fault to
-            start_time: Fault start time (seconds)
-            duration: Fault duration (seconds)
-            **kwargs: Additional fault parameters
+        # Initialize and run power flow if not already run
+        if not hasattr(system_copy, 'f') or not hasattr(system_copy.f, 'Bus'):
+            logger.info("Running power flow before transient simulation")
+            system_copy.PFlow.run()
             
-        Returns:
-            True if fault was applied successfully, False otherwise
-        """
-        print(f"Applying {fault_type} to {element_id} at t={start_time}s for {duration}s")
+            if not system_copy.PFlow.converged:
+                logger.error("Power flow did not converge, cannot proceed with transient simulation")
+                return False, None
         
-        try:
-            # Create a contingency
-            contingency = dynawo.Contingency(self.simulation)
-            
-            if fault_type == 'bus_fault':
-                # Bus fault (three-phase short circuit)
-                bus = self.network.get_bus(element_id)
-                if not bus:
-                    print(f"Bus {element_id} not found")
-                    return False
-                
-                resistance = kwargs.get('resistance', 0.0)
-                contingency.add_bus_fault(
-                    bus_id=element_id,
-                    start_time=start_time,
-                    end_time=start_time + duration,
-                    resistance=resistance
-                )
-                
-            elif fault_type == 'line_trip':
-                # Line trip
-                line = self.network.get_line(element_id)
-                if not line:
-                    print(f"Line {element_id} not found")
-                    return False
-                
-                contingency.add_line_trip(
-                    line_id=element_id,
-                    start_time=start_time,
-                    end_time=None  # Permanent trip
-                )
-                
-            elif fault_type == 'line_fault':
-                # Line fault followed by trip
-                line = self.network.get_line(element_id)
-                if not line:
-                    print(f"Line {element_id} not found")
-                    return False
-                
-                location = kwargs.get('location', 50.0)  # % from bus1, default to middle
-                resistance = kwargs.get('resistance', 0.0)
-                permanent = kwargs.get('permanent', True)
-                trip_time = kwargs.get('trip_time', start_time + duration)
-                
-                # Add fault
-                contingency.add_line_fault(
-                    line_id=element_id,
-                    start_time=start_time,
-                    end_time=start_time + duration,
-                    location=location,
-                    resistance=resistance
-                )
-                
-                # Add line trip if permanent
-                if permanent:
-                    contingency.add_line_trip(
-                        line_id=element_id,
-                        start_time=trip_time,
-                        end_time=None
-                    )
-                
-            elif fault_type == 'generator_trip':
-                # Generator trip
-                gen = self.network.get_generator(element_id)
-                if not gen:
-                    print(f"Generator {element_id} not found")
-                    return False
-                
-                contingency.add_generator_trip(
-                    generator_id=element_id,
-                    start_time=start_time,
-                    end_time=None  # Permanent trip
-                )
-                
-            elif fault_type == 'load_trip':
-                # Load trip
-                load = self.network.get_load(element_id)
-                if not load:
-                    print(f"Load {element_id} not found")
-                    return False
-                
-                contingency.add_load_trip(
-                    load_id=element_id,
-                    start_time=start_time,
-                    end_time=None  # Permanent trip
-                )
-                
-            elif fault_type == 'transformer_trip':
-                # Transformer trip
-                transformer = self.network.get_transformer(element_id)
-                if not transformer:
-                    print(f"Transformer {element_id} not found")
-                    return False
-                
-                contingency.add_transformer_trip(
-                    transformer_id=element_id,
-                    start_time=start_time,
-                    end_time=None  # Permanent trip
-                )
-                
-            else:
-                print(f"Unsupported fault type: {fault_type}")
-                return False
-            
-            # Add the contingency to the simulation
-            self.simulation.add_contingency(contingency)
-            print(f"Successfully applied {fault_type} to {element_id}")
-            return True
-            
-        except Exception as e:
-            print(f"Error applying fault: {str(e)}")
-            return False
-    
-    def run_simulation(self, duration=10.0, time_step=0.01):
-        """
-        Run a time-domain simulation for transient stability assessment.
+        # Initialize time-domain simulation
+        logger.info(f"Initializing transient simulation (t_end={t_end}s, dt={dt}s)")
+        system_copy.TDS.config.tf = t_end
+        system_copy.TDS.config.h = dt
+        system_copy.TDS.config.fixt = False  # Variable time step
+        system_copy.TDS.config.tstep = 1     # Output sampling interval (multiply by dt)
         
-        Args:
-            duration: Simulation duration (seconds)
-            time_step: Simulation time step (seconds)
-            
-        Returns:
-            Dictionary containing simulation results
-        """
-        print(f"Running transient stability simulation ({duration}s)...")
+        # Run time-domain simulation
+        system_copy.TDS.init()
+        system_copy.TDS.run()
         
-        # Set simulation parameters
-        self.simulation.set_duration(duration)
-        self.simulation.set_time_step(time_step)
+        # Check if simulation completed successfully
+        success = system_copy.TDS.converged
         
-        # Run the simulation
-        result = self.simulation.run()
-        
-        if result:
-            print("Transient stability simulation completed successfully")
-            
-            # Extract generator rotor angles
-            generators = self.network.get_generators()
-            gen_angles = {}
-            gen_speeds = {}
-            
-            for gen in generators:
-                gen_id = gen.get_id()
-                if hasattr(gen, 'get_rotor_angle'):
-                    angles = np.array(gen.get_variable_values('rotor_angle'))
-                    gen_angles[gen_id] = angles
-                
-                if hasattr(gen, 'get_rotor_speed'):
-                    speeds = np.array(gen.get_variable_values('rotor_speed'))
-                    gen_speeds[gen_id] = speeds
-            
-            # Extract bus voltages
-            buses = self.network.get_buses()
-            bus_voltages = {}
-            
-            for bus in buses:
-                bus_id = bus.get_id()
-                if bus.is_connected():
-                    voltages = np.array(bus.get_variable_values('v'))
-                    v_nom = bus.get_v_nom()
-                    voltages_pu = voltages / v_nom
-                    
-                    bus_voltages[bus_id] = {
-                        'voltage': voltages,
-                        'voltage_pu': voltages_pu
-                    }
-            
-            # Store time array
-            time = np.linspace(0, duration, len(next(iter(gen_angles.values()))) if gen_angles else 1)
-            
-            self.results = {
-                'success': True,
-                'time': time,
-                'generator_angles': gen_angles,
-                'generator_speeds': gen_speeds,
-                'bus_voltages': bus_voltages
-            }
-            
-            return self.results
+        if success:
+            logger.info(f"Transient simulation completed successfully")
         else:
-            print("Transient stability simulation failed")
-            self.results = {'success': False}
-            return self.results
+            logger.warning(f"Transient simulation failed to complete")
+        
+        # Return simulation results
+        return success, system_copy
     
-    def calculate_transient_stability_index(self):
-        """
-        Calculate the Transient Stability Index (TSI).
-        
-        TSI = ((360 - delta_max) / (360 + delta_max)) * 100%
-        
-        Where delta_max is the maximum angular separation between any two rotor angles in degrees.
-        
-        Returns:
-            TSI value (percentage)
-        """
-        if self.results is None or not self.results['success']:
-            print("No valid simulation results available")
-            return None
-        
-        gen_angles = self.results['generator_angles']
-        
-        if not gen_angles:
-            print("No generator angle data available")
-            return None
-        
-        # Calculate maximum angle separation for each time step
-        angle_separations = []
-        for t in range(len(self.results['time'])):
-            angles_at_t = [angles[t] for angles in gen_angles.values()]
-            if angles_at_t:
-                max_angle = max(angles_at_t)
-                min_angle = min(angles_at_t)
-                separation = max_angle - min_angle
-                angle_separations.append(separation)
-        
-        # Find the maximum separation across all time steps
-        if angle_separations:
-            max_separation = max(angle_separations)
-            
-            # Calculate TSI
-            tsi = ((360 - max_separation) / (360 + max_separation)) * 100
-            
-            print(f"Maximum angle separation: {max_separation:.2f} degrees")
-            print(f"Transient Stability Index (TSI): {tsi:.2f}%")
-            
-            return tsi
-        else:
-            print("Could not calculate angle separations")
-            return None
+    except Exception as e:
+        logger.error(f"Failed to run transient simulation: {str(e)}")
+        raise
+
+def get_generator_angles(system_with_tds):
+    """
+    Extract generator rotor angles from time-domain simulation results.
     
-    def check_generator_synchronism(self, threshold_degrees=180):
-        """
-        Check if generators maintain synchronism.
+    Args:
+        system_with_tds (andes.System): ANDES system object with completed TDS simulation
         
-        Args:
-            threshold_degrees: Angle threshold in degrees to consider loss of synchronism
-            
-        Returns:
-            Dictionary containing synchronism assessment
-        """
-        if self.results is None or not self.results['success']:
-            print("No valid simulation results available")
-            return {'stable': False, 'message': 'No valid simulation results'}
+    Returns:
+        pd.DataFrame: DataFrame with generator rotor angles over time
+    """
+    try:
+        # Check if time-domain simulation was run
+        if not hasattr(system_with_tds, 'TDS') or not hasattr(system_with_tds.TDS, 'tv'):
+            raise ValueError("Time-domain simulation results not available")
         
-        gen_angles = self.results['generator_angles']
+        # Get time vector
+        time_vector = system_with_tds.TDS.tv
         
-        if not gen_angles:
-            print("No generator angle data available")
-            return {'stable': False, 'message': 'No generator angle data'}
+        # Get generator rotor angles
+        angles_data = defaultdict(list)
+        angles_data['time'] = time_vector
         
-        # Check angle differences
-        max_separation = 0
-        unstable_gens = []
+        # Extract generator angles for all generators (GENROU model)
+        if hasattr(system_with_tds, 'GENROU'):
+            for gen_idx in range(system_with_tds.GENROU.n):
+                gen_name = system_with_tds.GENROU.name[gen_idx] if system_with_tds.GENROU.name[gen_idx] else f"GENROU_{gen_idx}"
+                
+                # Extract angle data
+                angles = []
+                for t_idx in range(len(time_vector)):
+                    # Convert to degrees for analysis
+                    angle_rad = system_with_tds.TDS.y[t_idx][f'GENROU_{gen_idx}_delta']
+                    angle_deg = np.degrees(angle_rad) % 360
+                    angles.append(angle_deg)
+                
+                angles_data[gen_name] = angles
         
-        for t in range(len(self.results['time'])):
-            angles_at_t = {}
-            for gen_id, angles in gen_angles.items():
-                angles_at_t[gen_id] = angles[t]
-            
-            for gen1_id, angle1 in angles_at_t.items():
-                for gen2_id, angle2 in angles_at_t.items():
-                    if gen1_id != gen2_id:
-                        separation = abs(angle1 - angle2)
-                        if separation > max_separation:
-                            max_separation = separation
-                        
-                        if separation > threshold_degrees:
-                            if gen1_id not in unstable_gens:
-                                unstable_gens.append(gen1_id)
-                            if gen2_id not in unstable_gens:
-                                unstable_gens.append(gen2_id)
+        # Create a DataFrame from the collected data
+        angles_df = pd.DataFrame(angles_data)
         
-        is_stable = len(unstable_gens) == 0
-        
-        if is_stable:
-            message = f"All generators maintain synchronism (max separation: {max_separation:.2f} degrees)"
-        else:
-            message = f"{len(unstable_gens)} generators lose synchronism (max separation: {max_separation:.2f} degrees)"
-        
-        return {
-            'stable': is_stable,
-            'max_separation': max_separation,
-            'unstable_generators': unstable_gens,
-            'message': message
-        }
+        return angles_df
     
-    def calculate_critical_clearing_time(self, fault_type, element_id, 
-                                        start_time=1.0, 
-                                        initial_duration=0.1,
-                                        max_duration=1.0,
-                                        step=0.05,
-                                        tsi_threshold=10,
-                                        **fault_params):
-        """
-        Calculate the Critical Clearing Time (CCT) for a given fault.
-        
-        Args:
-            fault_type: Type of fault
-            element_id: ID of the element to apply fault to
-            start_time: Fault start time
-            initial_duration: Initial fault duration to try
-            max_duration: Maximum fault duration to try
-            step: Step size for increasing fault duration
-            tsi_threshold: TSI threshold to consider unstable (%)
-            **fault_params: Additional fault parameters
-            
-        Returns:
-            Critical clearing time (seconds)
-        """
-        print(f"Calculating critical clearing time for {fault_type} on {element_id}...")
-        
-        # Create a copy of the simulation to avoid modifying the original
-        sim_copy = self.simulation.copy()
-        analyzer = TransientStabilityAnalyzer(sim_copy)
-        
-        duration = initial_duration
-        last_stable_duration = None
-        first_unstable_duration = None
-        
-        while duration <= max_duration:
-            # Apply fault
-            analyzer.apply_fault(fault_type, element_id, start_time, duration, **fault_params)
-            
-            # Run simulation
-            analyzer.run_simulation()
-            
-            # Calculate TSI
-            tsi = analyzer.calculate_transient_stability_index()
-            
-            if tsi is None or tsi < tsi_threshold:
-                print(f"Duration {duration}s: Unstable (TSI: {tsi}%)")
-                first_unstable_duration = duration
-                break
-            else:
-                print(f"Duration {duration}s: Stable (TSI: {tsi}%)")
-                last_stable_duration = duration
-            
-            # Increase duration
-            duration += step
-            
-            # Reset simulation for next iteration
-            sim_copy = self.simulation.copy()
-            analyzer = TransientStabilityAnalyzer(sim_copy)
-        
-        # If all durations were stable
-        if first_unstable_duration is None:
-            print(f"System remains stable up to {max_duration}s")
-            return max_duration
-        
-        # If the initial duration was unstable
-        if last_stable_duration is None:
-            print(f"System is unstable at initial duration {initial_duration}s")
-            return 0
-        
-        # Refine CCT using bisection method
-        lower = last_stable_duration
-        upper = first_unstable_duration
-        
-        print(f"Refining CCT between {lower}s and {upper}s")
-        
-        while upper - lower > 0.01:  # 10ms precision
-            mid = (lower + upper) / 2
-            
-            # Apply fault with mid duration
-            sim_copy = self.simulation.copy()
-            analyzer = TransientStabilityAnalyzer(sim_copy)
-            analyzer.apply_fault(fault_type, element_id, start_time, mid, **fault_params)
-            
-            # Run simulation
-            analyzer.run_simulation()
-            
-            # Calculate TSI
-            tsi = analyzer.calculate_transient_stability_index()
-            
-            if tsi is None or tsi < tsi_threshold:
-                print(f"Duration {mid}s: Unstable (TSI: {tsi}%)")
-                upper = mid
-            else:
-                print(f"Duration {mid}s: Stable (TSI: {tsi}%)")
-                lower = mid
-        
-        cct = lower
-        print(f"Critical Clearing Time: {cct:.3f}s")
-        return cct
+    except Exception as e:
+        logger.error(f"Failed to extract generator angles: {str(e)}")
+        raise
+
+def calculate_transient_stability_index(angles_df):
+    """
+    Calculate the Transient Stability Index (TSI) based on maximum angular separation.
+    TSI = (360 - δ_max) / (360 + δ_max) * 100%
     
-    def assess_transient_stability(self, tsi_threshold=10):
-        """
-        Assess transient stability based on simulation results.
+    Args:
+        angles_df (pd.DataFrame): DataFrame with generator rotor angles
         
-        Args:
-            tsi_threshold: TSI threshold to consider stable (%)
-            
-        Returns:
-            Dictionary containing assessment results
-        """
-        print("Assessing transient stability...")
+    Returns:
+        float: Transient Stability Index in percentage
+        float: Maximum angular separation in degrees
+    """
+    try:
+        # Get angle data (skip the time column)
+        angle_columns = [col for col in angles_df.columns if col != 'time']
         
-        if self.results is None or not self.results['success']:
-            return {'stable': False, 'message': 'No valid simulation results'}
+        # Calculate maximum angular separation for each time step
+        max_separation = []
+        
+        for _, row in angles_df.iterrows():
+            angles = [row[col] for col in angle_columns]
+            if len(angles) >= 2:  # Need at least 2 generators
+                # Calculate maximum separation between any two angles
+                max_diff = 0
+                for i in range(len(angles)):
+                    for j in range(i+1, len(angles)):
+                        # Calculate the shortest angle between two generators (considering 360° periodicity)
+                        diff = min(abs(angles[i] - angles[j]), 360 - abs(angles[i] - angles[j]))
+                        max_diff = max(max_diff, diff)
+                
+                max_separation.append(max_diff)
+        
+        # Get the maximum separation across all time steps
+        delta_max = max(max_separation) if max_separation else 0
         
         # Calculate TSI
-        tsi = self.calculate_transient_stability_index()
+        tsi = (360 - delta_max) / (360 + delta_max) * 100
         
-        # Check synchronism
-        sync_check = self.check_generator_synchronism()
+        logger.info(f"Maximum angular separation: {delta_max:.2f} degrees")
+        logger.info(f"Transient Stability Index (TSI): {tsi:.2f}%")
         
-        # Determine stability
-        is_stable = (tsi is not None and tsi >= tsi_threshold and sync_check['stable'])
+        return tsi, delta_max
+    
+    except Exception as e:
+        logger.error(f"Failed to calculate transient stability index: {str(e)}")
+        raise
+
+def assess_transient_stability(system_with_tds, tsi_threshold=10.0):
+    """
+    Assess transient stability based on the TSI threshold.
+    The system is considered transiently stable if TSI >= tsi_threshold.
+    
+    Args:
+        system_with_tds (andes.System): ANDES system object with completed TDS simulation
+        tsi_threshold (float): Threshold for TSI in percentage (default: 10%)
         
-        if is_stable:
-            message = f"System is transiently stable (TSI: {tsi:.2f}%)"
-        else:
-            reasons = []
-            if tsi is None:
-                reasons.append("could not calculate TSI")
-            elif tsi < tsi_threshold:
-                reasons.append(f"TSI ({tsi:.2f}%) below threshold ({tsi_threshold}%)")
-            
-            if not sync_check['stable']:
-                reasons.append("loss of synchronism")
-            
-            message = f"System is transiently unstable: {', '.join(reasons)}"
+    Returns:
+        bool: True if system is transiently stable, False otherwise
+        dict: Transient stability assessment results
+    """
+    try:
+        # Extract generator angles
+        angles_df = get_generator_angles(system_with_tds)
         
-        # Compile results
-        assessment = {
-            'stable': is_stable,
+        # Calculate TSI
+        tsi, delta_max = calculate_transient_stability_index(angles_df)
+        
+        # Assess stability
+        is_stable = tsi >= tsi_threshold
+        
+        # Create assessment results
+        assessment_results = {
+            'is_stable': is_stable,
             'tsi': tsi,
             'tsi_threshold': tsi_threshold,
-            'synchronism': sync_check,
-            'message': message
+            'max_angular_separation': delta_max,
+            'generator_count': len(angles_df.columns) - 1  # Subtract the time column
         }
         
-        print(message)
-        return assessment
+        if is_stable:
+            logger.info(f"System is transiently stable (TSI: {tsi:.2f}% >= threshold: {tsi_threshold}%)")
+        else:
+            logger.warning(f"System is transiently unstable (TSI: {tsi:.2f}% < threshold: {tsi_threshold}%)")
+        
+        return is_stable, assessment_results
+    
+    except Exception as e:
+        logger.error(f"Failed to assess transient stability: {str(e)}")
+        raise
 
+def plot_generator_angles(angles_df, filename=None):
+    """
+    Plot generator rotor angles from time-domain simulation.
+    
+    Args:
+        angles_df (pd.DataFrame): DataFrame with generator rotor angles
+        filename (str, optional): If provided, save the plot to this file
+        
+    Returns:
+        matplotlib.figure.Figure: Figure object with the generator angles plot
+    """
+    try:
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Get angle columns (skip the time column)
+        angle_columns = [col for col in angles_df.columns if col != 'time']
+        
+        # Plot each generator's angle
+        for col in angle_columns:
+            ax.plot(angles_df['time'], angles_df[col], label=col)
+        
+        # Add labels and title
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Rotor Angle (degrees)')
+        ax.set_title('Generator Rotor Angles during Transient Simulation')
+        
+        # Add grid and legend
+        ax.grid(True)
+        ax.legend(loc='best', fontsize=8)
+        
+        # Save if filename is provided
+        if filename:
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            logger.info(f"Generator angles plot saved to {filename}")
+        
+        return fig
+    
+    except Exception as e:
+        logger.error(f"Failed to plot generator angles: {str(e)}")
+        raise
 
-# Example usage
+def perform_transient_stability_assessment(system, fault_event=None, t_end=10.0, tsi_threshold=10.0):
+    """
+    Perform comprehensive transient stability assessment including time-domain simulation with a fault event.
+    
+    Args:
+        system (andes.System): ANDES system object
+        fault_event (callable, optional): Function to add a fault event to the system
+        t_end (float): End time for simulation in seconds
+        tsi_threshold (float): Threshold for TSI in percentage
+        
+    Returns:
+        dict: Dictionary with assessment results
+    """
+    try:
+        # Create a copy of the system
+        system_copy = deepcopy(system)
+        
+        # Apply fault event if provided
+        if fault_event is not None:
+            logger.info("Applying fault event to the system")
+            system_copy = fault_event(system_copy)
+        
+        # Run power flow to initialize the system
+        logger.info("Running power flow before transient stability assessment")
+        system_copy.PFlow.run()
+        
+        if not system_copy.PFlow.converged:
+            logger.error("Power flow did not converge, cannot proceed with transient stability assessment")
+            return {
+                'is_stable': False,
+                'reason': 'Power flow did not converge',
+                'simulation_success': False
+            }
+        
+        # Run transient simulation
+        logger.info("Running transient simulation for stability assessment")
+        simulation_success, system_with_tds = run_transient_simulation(system_copy, t_end=t_end)
+        
+        if not simulation_success:
+            logger.warning("Transient simulation failed, cannot assess stability")
+            return {
+                'is_stable': False,
+                'reason': 'Transient simulation failed',
+                'simulation_success': False
+            }
+        
+        # Assess transient stability
+        logger.info("Assessing transient stability from simulation results")
+        is_stable, assessment_results = assess_transient_stability(
+            system_with_tds, tsi_threshold=tsi_threshold
+        )
+        
+        # Add simulation success flag
+        assessment_results['simulation_success'] = True
+        
+        return assessment_results
+    
+    except Exception as e:
+        logger.error(f"Failed to perform transient stability assessment: {str(e)}")
+        raise
+
 if __name__ == "__main__":
-    # This requires a simulation object to be created first
-    # from load_ieee_systems import IEEESystemLoader
-    # loader = IEEESystemLoader()
-    # sim = loader.load_ieee68()
-    # analyzer = TransientStabilityAnalyzer(sim)
-    # analyzer.apply_fault('line_trip', 'LINE_1')
-    # analyzer.run_simulation()
-    # results = analyzer.assess_transient_stability()
-    pass
+    # Example usage
+    import load_ieee_system
+    
+    # Load IEEE 68-bus system
+    system = load_ieee_system.load_ieee68()
+    
+    # Define a simple fault event
+    def example_fault(sys):
+        # Create a copy of the system
+        sys_copy = deepcopy(sys)
+        # Apply a three-phase fault on bus 1 at t=1.0s, clear after 0.1s
+        sys_copy.TDS.add_event('bus_fault', 
+                             {'bus': 1, 'tf': 1.0, 'tc': 1.1, 'r': 0.0, 'x': 0.01})
+        return sys_copy
+    
+    # Perform transient stability assessment
+    assessment = perform_transient_stability_assessment(
+        system, fault_event=example_fault, t_end=5.0, tsi_threshold=10.0
+    )
+    
+    # Print summary
+    print("\nTransient Stability Assessment Summary:")
+    print(f"Simulation completed successfully: {assessment.get('simulation_success', False)}")
+    
+    if assessment.get('simulation_success', False):
+        print(f"System is transiently stable: {assessment['is_stable']}")
+        print(f"Transient Stability Index (TSI): {assessment['tsi']:.2f}%")
+        print(f"Maximum angular separation: {assessment['max_angular_separation']:.2f} degrees")
+        print(f"TSI threshold: {assessment['tsi_threshold']}%")
+        print(f"Number of generators: {assessment['generator_count']}")
+    else:
+        print(f"Reason for assessment failure: {assessment.get('reason', 'Unknown')}")
