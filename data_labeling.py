@@ -1,462 +1,469 @@
 """
-Module for labeling power system stability data based on stability assessment criteria.
+Module for labeling power system stability data based on multiple criteria.
 """
 
+import logging
 import numpy as np
 import pandas as pd
-from enum import Enum
+from copy import deepcopy
+import os
+import json
+from datetime import datetime
 
-# Import modules for stability assessment
-from static_security import StaticSecurityAssessor
-from small_signal_stability import SmallSignalStabilityAnalyzer
-from voltage_stability import VoltageStabilityAnalyzer
-from transient_stability import TransientStabilityAnalyzer
+# Import other modules
+import load_ieee_system
+import static_security
+import small_signal_stability
+import voltage_stability
+import transient_stability
+import fault_injection
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class StabilityLabels(Enum):
-    """Enumeration of stability labels."""
-    STABLE = "stable"
-    UNSTABLE = "unstable"
-    MARGINALLY_STABLE = "marginally_stable"
-    UNKNOWN = "unknown"
-
-
-class SecurityType(Enum):
-    """Enumeration of security assessment types."""
-    STATIC = "static_security"
-    SMALL_SIGNAL = "small_signal_stability"
-    VOLTAGE = "voltage_stability"
-    TRANSIENT = "transient_stability"
-    OVERALL = "overall_security"
-
-
-class DataLabeler:
-    """Class to label power system data based on various stability criteria."""
+class StabilityLabeler:
+    """
+    Class for performing comprehensive stability assessment and data labeling.
+    """
     
-    def __init__(self, simulation):
+    def __init__(self, system=None, output_dir='./labeled_data'):
         """
-        Initialize the data labeler.
+        Initialize the StabilityLabeler.
         
         Args:
-            simulation: A Dynawo simulation object
+            system (andes.System, optional): ANDES system object
+            output_dir (str): Directory to save labeled data
         """
-        self.simulation = simulation
-        self.network = simulation.get_network()
+        self.system = system
+        self.output_dir = output_dir
         
-        # Initialize assessors for each stability type
-        self.static_assessor = StaticSecurityAssessor(simulation)
-        self.small_signal_analyzer = SmallSignalStabilityAnalyzer(simulation)
-        self.voltage_analyzer = VoltageStabilityAnalyzer(simulation)
-        self.transient_analyzer = TransientStabilityAnalyzer(simulation)
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Store assessment results
-        self.results = {}
+        # Initialize dataframe for storing labeled data
+        self.data = pd.DataFrame()
         
-        # Define default criteria
+        # Define stability criteria thresholds
         self.criteria = {
-            'static_security': {
-                'overload_threshold': 90  # Line loading percentage threshold
+            'transient': {
+                'tsi_threshold': 10.0  # TSI threshold in percentage
             },
-            'small_signal_stability': {
-                'min_damping': 0.03,  # Minimum damping ratio
-                'freq_min': 0.25,     # Minimum frequency of interest (Hz)
-                'freq_max': 1.0       # Maximum frequency of interest (Hz)
+            'small_signal': {
+                'damping_threshold': 3.0  # Damping ratio threshold in percentage
             },
-            'voltage_stability': {
-                'v_min': 0.8,            # Minimum acceptable voltage in p.u.
-                'v_max': 1.1,            # Maximum acceptable voltage in p.u.
-                'violation_duration': 0.5 # Maximum duration for voltage violations (seconds)
+            'voltage': {
+                'v_min': 0.8,  # Minimum voltage in p.u.
+                'v_max': 1.1,  # Maximum voltage in p.u.
+                'min_duration': 0.5  # Minimum duration for voltage violation in seconds
             },
-            'transient_stability': {
-                'tsi_threshold': 10.0   # TSI threshold to consider stable (%)
+            'static': {
+                'overload_threshold': 100.0  # Line loading threshold in percentage
             }
         }
+        
+        logger.info("StabilityLabeler initialized")
     
-    def set_criteria(self, criteria_type, **kwargs):
+    def load_system(self, system_name='ieee68', case_path=None):
         """
-        Set custom criteria for stability assessment.
+        Load a power system model.
         
         Args:
-            criteria_type: Type of stability criteria to set
-            **kwargs: Criteria parameters
-        """
-        if criteria_type in self.criteria:
-            for key, value in kwargs.items():
-                if key in self.criteria[criteria_type]:
-                    self.criteria[criteria_type][key] = value
-                    print(f"Set {criteria_type}.{key} = {value}")
-                else:
-                    print(f"Warning: Unknown criterion '{key}' for {criteria_type}")
-        else:
-            print(f"Warning: Unknown criteria type '{criteria_type}'")
-    
-    def assess_static_security(self):
-        """
-        Perform static security assessment.
-        
-        Returns:
-            Tuple of (label, details)
-        """
-        print("Assessing static security...")
-        
-        criteria = self.criteria['static_security']
-        
-        # Perform assessment
-        assessment = self.static_assessor.assess_static_security(
-            overload_threshold=criteria['overload_threshold']
-        )
-        
-        # Determine label
-        if not assessment['converged']:
-            label = StabilityLabels.UNSTABLE.value
-            details = "Power flow did not converge"
-        elif assessment['secure']:
-            label = StabilityLabels.STABLE.value
-            details = "No violations found"
-        else:
-            # Calculate overload index
-            if 'overload_index' in assessment:
-                overload_index = assessment['overload_index']
-                
-                # Formula from the criteria:
-                # f_x = sum(w_i * (S_mean,i / S_max,i)^p)
-                # We consider the system marginally stable if 0.9 < overload_index < 1.0
-                if overload_index is not None:
-                    if overload_index < 0.8:
-                        label = StabilityLabels.STABLE.value
-                        details = f"Overload index is low: {overload_index:.4f}"
-                    elif overload_index < 0.9:
-                        label = StabilityLabels.MARGINALLY_STABLE.value
-                        details = f"Overload index is moderate: {overload_index:.4f}"
-                    else:
-                        label = StabilityLabels.UNSTABLE.value
-                        details = f"Overload index is high: {overload_index:.4f}"
-                else:
-                    label = StabilityLabels.UNSTABLE.value
-                    details = "Critical line loadings or voltage violations"
-            else:
-                label = StabilityLabels.UNSTABLE.value
-                details = "Critical line loadings or voltage violations"
-        
-        # Store results
-        self.results[SecurityType.STATIC.value] = {
-            'label': label,
-            'details': details,
-            'assessment': assessment
-        }
-        
-        print(f"Static security assessment result: {label} - {details}")
-        return label, details
-    
-    def assess_small_signal_stability(self):
-        """
-        Perform small-signal stability assessment.
-        
-        Returns:
-            Tuple of (label, details)
-        """
-        print("Assessing small-signal stability...")
-        
-        criteria = self.criteria['small_signal_stability']
-        
-        # Perform assessment
-        assessment = self.small_signal_analyzer.assess_small_signal_stability(
-            min_damping=criteria['min_damping'],
-            freq_min=criteria['freq_min'],
-            freq_max=criteria['freq_max']
-        )
-        
-        # Determine label
-        if not assessment['success']:
-            label = StabilityLabels.UNKNOWN.value
-            details = "Linearization failed"
-        elif assessment['stable']:
-            label = StabilityLabels.STABLE.value
-            details = "All modes have sufficient damping"
-        else:
-            # Check severity of damping issues
-            if 'poorly_damped_modes' in assessment and assessment['poorly_damped_modes'] is not None:
-                poorly_damped = assessment['poorly_damped_modes']
-                
-                if len(poorly_damped) == 0:
-                    label = StabilityLabels.STABLE.value
-                    details = "All modes have sufficient damping"
-                else:
-                    # Get minimum damping ratio
-                    min_damping = poorly_damped['damping_ratio'].min()
-                    
-                    if min_damping >= 0.01:  # Still has some damping
-                        label = StabilityLabels.MARGINALLY_STABLE.value
-                        details = f"Minimum damping ratio: {min_damping:.4f} (threshold: {criteria['min_damping']})"
-                    else:
-                        label = StabilityLabels.UNSTABLE.value
-                        details = f"Very poor damping: {min_damping:.4f} (threshold: {criteria['min_damping']})"
-            else:
-                label = StabilityLabels.UNSTABLE.value
-                details = "Poorly damped oscillatory modes"
-        
-        # Store results
-        self.results[SecurityType.SMALL_SIGNAL.value] = {
-            'label': label,
-            'details': details,
-            'assessment': assessment
-        }
-        
-        print(f"Small-signal stability assessment result: {label} - {details}")
-        return label, details
-    
-    def assess_voltage_stability(self):
-        """
-        Perform voltage stability assessment.
-        
-        Returns:
-            Tuple of (label, details)
-        """
-        print("Assessing voltage stability...")
-        
-        criteria = self.criteria['voltage_stability']
-        
-        # Perform assessment
-        assessment = self.voltage_analyzer.assess_voltage_stability(
-            v_min=criteria['v_min'],
-            v_max=criteria['v_max'],
-            violation_duration=criteria['violation_duration']
-        )
-        
-        # Determine label
-        if not assessment['success']:
-            label = StabilityLabels.UNKNOWN.value
-            details = "Simulation failed"
-        elif assessment['secure']:
-            label = StabilityLabels.STABLE.value
-            details = "No sustained voltage violations"
-        else:
-            # Check severity of voltage violations
-            num_violations = len(assessment['violations'])
-            max_duration = 0
-            extreme_voltage = 0
+            system_name (str): Name of the system to load ('ieee68' or 'ieee300')
+            case_path (str, optional): Path to a custom case file
             
-            for bus_id, violation in assessment['violations'].items():
-                max_duration = max(max_duration, violation['duration'])
-                
-                if violation['violation_type'] == 'Low':
-                    extreme_voltage = min(extreme_voltage, violation['min_voltage'])
-                else:  # High violation
-                    extreme_voltage = max(extreme_voltage, violation['max_voltage'])
+        Returns:
+            bool: True if system was loaded successfully
+        """
+        try:
+            if system_name.lower() == 'ieee68':
+                self.system = load_ieee_system.load_ieee68()
+                logger.info("Loaded IEEE 68-bus system")
+            elif system_name.lower() == 'ieee300':
+                self.system = load_ieee_system.load_ieee300()
+                logger.info("Loaded IEEE 300-bus system")
+            elif case_path:
+                self.system = load_ieee_system.load_custom_case(case_path)
+                logger.info(f"Loaded custom case from {case_path}")
+            else:
+                logger.error("No valid system specified")
+                return False
             
-            # Determine stability based on criteria specified in the requirements
-            # "A system is considered insecure if any bus voltage deviates from the range of 0.8 pu to 1.1 pu for more than 0.5 seconds"
-            if max_duration > criteria['violation_duration'] + 0.2:  # Significantly longer violation
-                label = StabilityLabels.UNSTABLE.value
-                details = f"{num_violations} buses with voltage violations for up to {max_duration:.2f}s"
-            elif max_duration > criteria['violation_duration']:
-                label = StabilityLabels.MARGINALLY_STABLE.value
-                details = f"{num_violations} buses with voltage violations for up to {max_duration:.2f}s"
-            else:
-                label = StabilityLabels.STABLE.value
-                details = "Short-duration voltage deviations only"
+            return True
         
-        # Store results
-        self.results[SecurityType.VOLTAGE.value] = {
-            'label': label,
-            'details': details,
-            'assessment': assessment
-        }
-        
-        print(f"Voltage stability assessment result: {label} - {details}")
-        return label, details
+        except Exception as e:
+            logger.error(f"Failed to load system: {str(e)}")
+            return False
     
-    def assess_transient_stability(self):
+    def assess_all_stability(self, system, fault_event=None, t_end=10.0):
         """
-        Perform transient stability assessment.
-        
-        Returns:
-            Tuple of (label, details)
-        """
-        print("Assessing transient stability...")
-        
-        criteria = self.criteria['transient_stability']
-        
-        # Perform assessment
-        assessment = self.transient_analyzer.assess_transient_stability(
-            tsi_threshold=criteria['tsi_threshold']
-        )
-        
-        # Determine label based on TSI value
-        # "The system is considered transiently insecure if the TSI is less than 10%"
-        if assessment.get('tsi') is None:
-            label = StabilityLabels.UNKNOWN.value
-            details = "Could not calculate TSI"
-        else:
-            tsi = assessment['tsi']
-            
-            if tsi >= criteria['tsi_threshold'] + 10:  # Well above threshold
-                label = StabilityLabels.STABLE.value
-                details = f"TSI = {tsi:.2f}% (threshold: {criteria['tsi_threshold']}%)"
-            elif tsi >= criteria['tsi_threshold']:  # Just above threshold
-                label = StabilityLabels.MARGINALLY_STABLE.value
-                details = f"TSI = {tsi:.2f}% (threshold: {criteria['tsi_threshold']}%)"
-            else:
-                label = StabilityLabels.UNSTABLE.value
-                details = f"TSI = {tsi:.2f}% (threshold: {criteria['tsi_threshold']}%)"
-        
-        # Store results
-        self.results[SecurityType.TRANSIENT.value] = {
-            'label': label,
-            'details': details,
-            'assessment': assessment
-        }
-        
-        print(f"Transient stability assessment result: {label} - {details}")
-        return label, details
-    
-    def assess_overall_stability(self):
-        """
-        Perform a comprehensive stability assessment.
-        
-        Returns:
-            Tuple of (label, details)
-        """
-        print("Performing comprehensive stability assessment...")
-        
-        # Perform all individual assessments if not already done
-        if SecurityType.STATIC.value not in self.results:
-            self.assess_static_security()
-        
-        if SecurityType.SMALL_SIGNAL.value not in self.results:
-            self.assess_small_signal_stability()
-        
-        if SecurityType.VOLTAGE.value not in self.results:
-            self.assess_voltage_stability()
-        
-        if SecurityType.TRANSIENT.value not in self.results:
-            self.assess_transient_stability()
-        
-        # Count results by label
-        label_counts = {
-            StabilityLabels.STABLE.value: 0,
-            StabilityLabels.MARGINALLY_STABLE.value: 0,
-            StabilityLabels.UNSTABLE.value: 0,
-            StabilityLabels.UNKNOWN.value: 0
-        }
-        
-        for security_type, result in self.results.items():
-            if security_type != SecurityType.OVERALL.value:
-                label_counts[result['label']] += 1
-        
-        # Determine overall label
-        if label_counts[StabilityLabels.UNSTABLE.value] > 0:
-            # Any unstable criterion makes the system unstable
-            label = StabilityLabels.UNSTABLE.value
-            details = "System is unstable in one or more criteria"
-        elif label_counts[StabilityLabels.MARGINALLY_STABLE.value] > 0:
-            # Any marginally stable criterion with no unstable ones
-            label = StabilityLabels.MARGINALLY_STABLE.value
-            details = "System is marginally stable in one or more criteria"
-        elif label_counts[StabilityLabels.STABLE.value] + label_counts[StabilityLabels.UNKNOWN.value] == 4:
-            # All criteria are either stable or unknown
-            if label_counts[StabilityLabels.UNKNOWN.value] > 0:
-                label = StabilityLabels.MARGINALLY_STABLE.value
-                details = "System appears stable but some assessments are incomplete"
-            else:
-                label = StabilityLabels.STABLE.value
-                details = "System is stable in all criteria"
-        else:
-            # Shouldn't reach here, but just in case
-            label = StabilityLabels.UNKNOWN.value
-            details = "Could not determine overall stability"
-        
-        # Store results
-        self.results[SecurityType.OVERALL.value] = {
-            'label': label,
-            'details': details,
-            'label_counts': label_counts
-        }
-        
-        print(f"Overall stability assessment result: {label} - {details}")
-        return label, details
-    
-    def get_stability_dataframe(self):
-        """
-        Get a DataFrame containing stability assessment results.
-        
-        Returns:
-            DataFrame with stability assessment results
-        """
-        # Ensure all assessments have been performed
-        if SecurityType.OVERALL.value not in self.results:
-            self.assess_overall_stability()
-        
-        # Prepare data
-        data = []
-        
-        for security_type, result in self.results.items():
-            data.append({
-                'security_type': security_type,
-                'label': result['label'],
-                'details': result['details']
-            })
-        
-        return pd.DataFrame(data)
-    
-    def export_results(self, filename=None):
-        """
-        Export stability assessment results to a file.
+        Perform comprehensive stability assessment on a system.
         
         Args:
-            filename: Name of the file to export to (if None, return a dictionary)
+            system (andes.System): ANDES system to assess
+            fault_event (callable, optional): Function to apply a fault event
+            t_end (float): End time for time-domain simulations
             
         Returns:
-            Dictionary with results if filename is None, otherwise None
+            dict: Dictionary with assessment results for all stability types
         """
-        # Ensure all assessments have been performed
-        if SecurityType.OVERALL.value not in self.results:
-            self.assess_overall_stability()
-        
-        # Prepare export data
-        export_data = {
-            'overall': {
-                'label': self.results[SecurityType.OVERALL.value]['label'],
-                'details': self.results[SecurityType.OVERALL.value]['details']
-            },
-            'criteria': self.criteria,
-            'assessments': {}
-        }
-        
-        for security_type, result in self.results.items():
-            if security_type != SecurityType.OVERALL.value:
-                export_data['assessments'][security_type] = {
-                    'label': result['label'],
-                    'details': result['details']
+        try:
+            # If fault event provided, apply it to a copy of the system
+            system_to_assess = system
+            if fault_event is not None:
+                logger.info("Applying fault event")
+                system_to_assess = fault_event(deepcopy(system))
+            
+            # Run power flow for static security assessment
+            logger.info("Running power flow for static security assessment")
+            converged, _, solved_system = static_security.run_power_flow(system_to_assess)
+            
+            if not converged:
+                logger.warning("Power flow did not converge")
+                return {
+                    'converged': False,
+                    'static_secure': False,
+                    'small_signal_stable': False,
+                    'voltage_stable': False,
+                    'transient_stable': False,
+                    'overall_stable': False,
+                    'reason': 'Power flow did not converge'
                 }
-        
-        # Export to file if specified
-        if filename:
-            if filename.endswith('.json'):
-                import json
-                with open(filename, 'w') as f:
-                    json.dump(export_data, f, indent=2)
-            elif filename.endswith('.csv'):
-                df = self.get_stability_dataframe()
-                df.to_csv(filename, index=False)
-            else:
-                print(f"Unsupported file format: {filename}")
-                return export_data
             
-            print(f"Results exported to {filename}")
+            # 1. Static security assessment
+            logger.info("Performing static security assessment")
+            static_assessment = {}
+            
+            # Calculate line loadings
+            line_loadings = static_security.calculate_line_loadings(solved_system)
+            overloaded_lines = line_loadings[line_loadings['loading_percent'] > self.criteria['static']['overload_threshold']]
+            
+            # Calculate overload index
+            overload_idx, _ = static_security.calculate_overload_index(solved_system)
+            
+            # Check voltage violations
+            voltage_violations = static_security.check_voltage_violations(
+                solved_system, 
+                v_min=self.criteria['voltage']['v_min'], 
+                v_max=self.criteria['voltage']['v_max']
+            )
+            
+            static_assessment = {
+                'static_secure': len(overloaded_lines) == 0,
+                'overload_index': overload_idx,
+                'overloaded_lines_count': len(overloaded_lines),
+                'voltage_violations_count': len(voltage_violations)
+            }
+            
+            # 2. Small-signal stability assessment
+            logger.info("Performing small-signal stability assessment")
+            ss_assessment = small_signal_stability.perform_small_signal_assessment(
+                solved_system, 
+                damping_threshold=self.criteria['small_signal']['damping_threshold']
+            )
+            
+            # 3. Run time-domain simulation for both voltage and transient stability if needed
+            logger.info("Running time-domain simulation for transient and voltage stability assessment")
+            simulation_success, system_with_tds = transient_stability.run_transient_simulation(
+                system_to_assess, t_end=t_end
+            )
+            
+            if not simulation_success:
+                logger.warning("Time-domain simulation failed")
+                return {
+                    'converged': True,
+                    'static_secure': static_assessment['static_secure'],
+                    'small_signal_stable': ss_assessment['is_stable'],
+                    'voltage_stable': False,
+                    'transient_stable': False,
+                    'overall_stable': False,
+                    'reason': 'Time-domain simulation failed',
+                    'static_assessment': static_assessment,
+                    'small_signal_assessment': ss_assessment
+                }
+            
+            # 4. Voltage stability assessment
+            logger.info("Performing voltage stability assessment")
+            voltage_stable, voltage_assessment = voltage_stability.assess_voltage_stability(
+                system_with_tds,
+                v_min=self.criteria['voltage']['v_min'],
+                v_max=self.criteria['voltage']['v_max'],
+                min_duration=self.criteria['voltage']['min_duration']
+            )
+            
+            # 5. Transient stability assessment
+            logger.info("Performing transient stability assessment")
+            transient_stable, transient_assessment = transient_stability.assess_transient_stability(
+                system_with_tds,
+                tsi_threshold=self.criteria['transient']['tsi_threshold']
+            )
+            
+            # Combine all assessments
+            overall_stable = (
+                static_assessment['static_secure'] and
+                ss_assessment['is_stable'] and
+                voltage_stable and
+                transient_stable
+            )
+            
+            assessment_results = {
+                'converged': True,
+                'static_secure': static_assessment['static_secure'],
+                'small_signal_stable': ss_assessment['is_stable'],
+                'voltage_stable': voltage_stable,
+                'transient_stable': transient_stable,
+                'overall_stable': overall_stable,
+                'static_assessment': static_assessment,
+                'small_signal_assessment': ss_assessment,
+                'voltage_assessment': voltage_assessment,
+                'transient_assessment': transient_assessment
+            }
+            
+            logger.info(f"Comprehensive stability assessment completed. System is {'stable' if overall_stable else 'unstable'}")
+            return assessment_results
+        
+        except Exception as e:
+            logger.error(f"Failed to perform comprehensive stability assessment: {str(e)}")
+            raise
+    
+    def generate_labeled_dataset(self, n_scenarios=100, fault_types=None, save=True):
+        """
+        Generate a labeled dataset with multiple fault scenarios.
+        
+        Args:
+            n_scenarios (int): Number of fault scenarios to generate
+            fault_types (list, optional): List of fault types to include
+            save (bool): Whether to save the dataset
+            
+        Returns:
+            pd.DataFrame: DataFrame with labeled stability data
+        """
+        try:
+            if self.system is None:
+                logger.error("No system loaded. Call load_system() first.")
+                return None
+            
+            # Generate fault scenarios
+            logger.info(f"Generating {n_scenarios} fault scenarios")
+            scenarios = fault_injection.generate_fault_scenarios(
+                self.system, n_scenarios=n_scenarios, fault_types=fault_types
+            )
+            
+            # Initialize data storage
+            data_rows = []
+            
+            # Process each scenario
+            for i, (faulted_system, fault_info) in enumerate(scenarios):
+                logger.info(f"Processing scenario {i+1}/{n_scenarios}")
+                
+                # Assess stability
+                assessment = self.assess_all_stability(faulted_system)
+                
+                # Create data row
+                data_row = {
+                    'scenario_id': i,
+                    'fault_type': fault_info['type'],
+                    'fault_time': fault_info['time'],
+                    'clear_time': fault_info['clear_time'],
+                    'converged': assessment['converged'],
+                    'static_secure': assessment['static_secure'],
+                    'small_signal_stable': assessment['small_signal_stable'],
+                    'voltage_stable': assessment['voltage_stable'],
+                    'transient_stable': assessment['transient_stable'],
+                    'overall_stable': assessment['overall_stable']
+                }
+                
+                # Add fault-specific details
+                for key, value in fault_info.items():
+                    if key not in data_row:
+                        data_row[f'fault_{key}'] = value
+                
+                # Add detailed assessment metrics
+                if assessment['converged']:
+                    # Static security metrics
+                    data_row['overload_index'] = assessment['static_assessment']['overload_index']
+                    data_row['overloaded_lines_count'] = assessment['static_assessment']['overloaded_lines_count']
+                    
+                    # Small-signal stability metrics
+                    data_row['min_damping_ratio'] = assessment['small_signal_assessment']['min_damping_ratio']
+                    data_row['critical_modes_count'] = assessment['small_signal_assessment']['critical_modes_count']
+                    
+                    if assessment['transient_stable'] is not None:
+                        # Transient stability metrics
+                        data_row['tsi'] = assessment['transient_assessment']['tsi']
+                        data_row['max_angular_separation'] = assessment['transient_assessment']['max_angular_separation']
+                    
+                    if assessment['voltage_stable'] is not None:
+                        # Voltage stability metrics
+                        data_row['voltage_violations_count'] = assessment['voltage_assessment']['violations_count']
+                
+                data_rows.append(data_row)
+                
+                # Log progress
+                if (i + 1) % 10 == 0 or i + 1 == n_scenarios:
+                    logger.info(f"Processed {i + 1}/{n_scenarios} scenarios")
+            
+            # Create DataFrame
+            self.data = pd.DataFrame(data_rows)
+            
+            # Save dataset if requested
+            if save:
+                self._save_dataset()
+            
+            logger.info(f"Generated labeled dataset with {len(self.data)} scenarios")
+            return self.data
+        
+        except Exception as e:
+            logger.error(f"Failed to generate labeled dataset: {str(e)}")
+            raise
+    
+    def _save_dataset(self, filename=None):
+        """
+        Save the labeled dataset to file.
+        
+        Args:
+            filename (str, optional): Custom filename to use
+            
+        Returns:
+            str: Path to the saved file
+        """
+        try:
+            if self.data.empty:
+                logger.warning("No data to save")
+                return None
+            
+            # Generate filename if not provided
+            if filename is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"stability_data_{timestamp}.csv"
+            
+            # Ensure the filename has .csv extension
+            if not filename.endswith('.csv'):
+                filename += '.csv'
+            
+            # Create full path
+            filepath = os.path.join(self.output_dir, filename)
+            
+            # Save to CSV
+            self.data.to_csv(filepath, index=False)
+            logger.info(f"Saved labeled dataset to {filepath}")
+            
+            # Also save a metadata file with the criteria used
+            metadata = {
+                'timestamp': datetime.now().isoformat(),
+                'n_scenarios': len(self.data),
+                'stability_criteria': self.criteria,
+                'statistics': {
+                    'overall_stable_percent': (self.data['overall_stable'].mean() * 100),
+                    'static_secure_percent': (self.data['static_secure'].mean() * 100),
+                    'small_signal_stable_percent': (self.data['small_signal_stable'].mean() * 100),
+                    'voltage_stable_percent': (self.data['voltage_stable'].mean() * 100),
+                    'transient_stable_percent': (self.data['transient_stable'].mean() * 100),
+                }
+            }
+            
+            metadata_filepath = os.path.join(self.output_dir, f"{os.path.splitext(filename)[0]}_metadata.json")
+            with open(metadata_filepath, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.info(f"Saved metadata to {metadata_filepath}")
+            
+            return filepath
+        
+        except Exception as e:
+            logger.error(f"Failed to save dataset: {str(e)}")
             return None
-        else:
-            return export_data
+    
+    def load_dataset(self, filepath):
+        """
+        Load a previously saved labeled dataset.
+        
+        Args:
+            filepath (str): Path to the CSV file
+            
+        Returns:
+            bool: True if dataset was loaded successfully
+        """
+        try:
+            self.data = pd.read_csv(filepath)
+            logger.info(f"Loaded dataset with {len(self.data)} rows from {filepath}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Failed to load dataset: {str(e)}")
+            return False
+    
+    def get_stability_statistics(self):
+        """
+        Get statistics about the stability assessments in the dataset.
+        
+        Returns:
+            dict: Dictionary with stability statistics
+        """
+        if self.data.empty:
+            logger.warning("No data available for statistics")
+            return {}
+        
+        try:
+            stats = {
+                'total_scenarios': len(self.data),
+                'overall_stable_count': self.data['overall_stable'].sum(),
+                'overall_stable_percent': (self.data['overall_stable'].mean() * 100),
+                'static_secure_percent': (self.data['static_secure'].mean() * 100),
+                'small_signal_stable_percent': (self.data['small_signal_stable'].mean() * 100),
+                'voltage_stable_percent': (self.data['voltage_stable'].mean() * 100),
+                'transient_stable_percent': (self.data['transient_stable'].mean() * 100),
+            }
+            
+            # Add fault type breakdown
+            fault_type_counts = self.data['fault_type'].value_counts()
+            stats['fault_type_counts'] = fault_type_counts.to_dict()
+            
+            # Add stability by fault type
+            stability_by_fault_type = {}
+            for fault_type in fault_type_counts.index:
+                fault_data = self.data[self.data['fault_type'] == fault_type]
+                stability_by_fault_type[fault_type] = {
+                    'count': len(fault_data),
+                    'overall_stable_percent': (fault_data['overall_stable'].mean() * 100),
+                    'static_secure_percent': (fault_data['static_secure'].mean() * 100),
+                    'small_signal_stable_percent': (fault_data['small_signal_stable'].mean() * 100),
+                    'voltage_stable_percent': (fault_data['voltage_stable'].mean() * 100),
+                    'transient_stable_percent': (fault_data['transient_stable'].mean() * 100),
+                }
+            
+            stats['stability_by_fault_type'] = stability_by_fault_type
+            
+            logger.info(f"Generated stability statistics")
+            return stats
+        
+        except Exception as e:
+            logger.error(f"Failed to generate statistics: {str(e)}")
+            return {}
 
-
-# Example usage
 if __name__ == "__main__":
-    # This requires a simulation object to be created first
-    # from load_ieee_systems import IEEESystemLoader
-    # loader = IEEESystemLoader()
-    # sim = loader.load_ieee68()
-    # labeler = DataLabeler(sim)
-    # labeler.assess_overall_stability()
-    # df = labeler.get_stability_dataframe()
-    # print(df)
-    pass
+    # Example usage
+    labeler = StabilityLabeler(output_dir='./stability_data')
+    
+    # Load a system
+    labeler.load_system('ieee68')
+    
+    # Generate a small labeled dataset
+    data = labeler.generate_labeled_dataset(n_scenarios=5, save=True)
+    
+    # Print statistics
+    stats = labeler.get_stability_statistics()
+    print("\nStability Statistics:")
+    for key, value in stats.items():
+        if key != 'stability_by_fault_type' and key != 'fault_type_counts':
+            print(f"  {key}: {value}")
+    
+    print("\nFault Type Counts:")
+    for fault_type, count in stats.get('fault_type_counts', {}).items():
+        print(f"  {fault_type}: {count}")
+    
+    print("\nStability by Fault Type:")
+    for fault_type, fault_stats in stats.get('stability_by_fault_type', {}).items():
+        print(f"  {fault_type}:")
+        for stat_key, stat_value in fault_stats.items():
+            print(f"    {stat_key}: {stat_value}")
