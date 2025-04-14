@@ -4,7 +4,7 @@ This framework provides a comprehensive set of tools for performing power system
 
 ## Features
 
-- **IEEE System Loading**: Load IEEE 68-bus and IEEE 300-bus test systems
+- **IEEE System Loading**: Load IEEE 68-bus and IEEE 118-bus test systems
 - **Topology Modifications**: Change transmission line capacities, connections, and bus configurations
 - **Stability Assessments**:
   - Static Security Assessment through power flow analysis
