@@ -152,10 +152,6 @@ The framework implements the following stability criteria:
 - Matplotlib: For visualization
 - Other scientific Python packages
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
 ## References
 
 - Liu, Z., et al. (2018). Accurate Power Swing-Based Algorithm for Transient Stability Assessment.
