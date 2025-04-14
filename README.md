@@ -1,273 +1,164 @@
-# Power System Stability Analysis with Dynawo
+# Power System Stability Analysis Framework
 
-This package provides a comprehensive set of Python modules for power system stability analysis using the Dynawo simulation tool. It enables detailed assessment of transient stability, small-signal stability, voltage stability, and static security for power systems.
+This framework provides a comprehensive set of tools for performing power system stability analysis using the ANDES (Advanced Network Dynamic Extension for Simulations) package. It includes modules for loading IEEE test systems, modifying network topology, and performing various types of stability assessments.
 
 ## Features
 
-- Load standard IEEE test cases (68-bus and 300-bus)
-- Perform topological changes to the network
-- Run various types of stability assessments:
-  - Static security assessment (power flow, line loading)
-  - Small-signal stability analysis (eigenvalues, damping)
-  - Voltage stability analysis (time-domain, violations)
-  - Transient stability analysis (TSI calculation)
-- Inject different types of faults:
-  - Line trips
-  - Generator trips
-  - Bus faults
-  - Transformer trips
-  - Cascading failures
-- Label data based on stability criteria
+- **IEEE System Loading**: Load IEEE 68-bus and IEEE 300-bus test systems
+- **Topology Modifications**: Change transmission line capacities, connections, and bus configurations
+- **Stability Assessments**:
+  - Static Security Assessment through power flow analysis
+  - Small-Signal Stability Analysis with damping ratio criteria
+  - Voltage Stability Assessment
+  - Transient Stability Analysis with TSI calculation
+- **Fault Injection**: Apply various fault types including bus faults, line trips, generator trips, and load changes
+- **Data Labeling**: Generate labeled datasets based on comprehensive stability criteria
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8 or higher
-- Dynawo simulation tool (see [Dynawo installation guide](https://dynawo.github.io/install/))
-
-### Setup
-
 1. Clone this repository:
-   ```bash
-    git@github.com:HodgeLab/DataGenerationScriptsPSSA.git
-    cd DataGenerationScriptsPSSA
-   ```
+```bash
+git clone git@github.com:HodgeLab/DataGenerationScriptsPSSA.git
+cd DataGenerationScriptsPSSA
+```
 
-2. Install required Python packages:
-   ```bash
-   pip install -r requirements.txt
-   ```
+2. Create a virtual environment (optional but recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
-3. Set up environment variables for Dynawo:
-   ```bash
-   export DYNAWO_HOME=/path/to/dynawo
-   export DYNAWO_DYD_PATH=/path/to/dyd/files
-   export DYNAWO_PAR_PATH=/path/to/par/files
-   export DYNAWO_IIDM_PATH=/path/to/iidm/files
-   ```
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-## Modules Overview
+## Modules
 
-### 1. `load_ieee_systems.py`
-Loads standard IEEE test systems (68-bus and 300-bus).
+The framework consists of the following Python modules:
+
+- `load_ieee_system.py`: Functions for loading IEEE test systems
+- `topology_changes.py`: Tools for modifying power system topology
+- `static_security.py`: Static security assessment through power flows
+- `small_signal_stability.py`: Small-signal stability analysis
+- `voltage_stability.py`: Voltage stability assessment
+- `transient_stability.py`: Transient stability analysis
+- `fault_injection.py`: Tools for injecting different types of faults
+- `data_labeling.py`: Data labeling based on stability criteria
+
+## Usage Examples
+
+### Loading a System
 
 ```python
-from load_ieee_systems import IEEESystemLoader
-
-# Initialize loader
-loader = IEEESystemLoader()
+import load_ieee_system
 
 # Load IEEE 68-bus system
-sim68 = loader.load_ieee68()
+system = load_ieee_system.load_ieee68()
 
-# Load IEEE 300-bus system
-sim300 = loader.load_ieee300()
+# Get system information
+system_info = load_ieee_system.get_system_info(system)
+print("System info:", system_info)
 ```
 
-### 2. `topology_changes.py`
-Modifies the topology of power system models.
+### Modifying Topology
 
 ```python
-from topology_changes import TopologyModifier
+import topology_changes
 
-# Initialize modifier with a simulation
-modifier = TopologyModifier(sim68)
+# Modify line capacity
+modified_system = topology_changes.modify_line_capacity(system, line_idx=0, new_capacity_mva=150.0)
 
 # Disconnect a line
-modifier.disconnect_line("LINE_1")
-
-# Change line capacity
-modifier.change_line_capacity("LINE_2", new_rating=1200)
-
-# Restore original topology
-modifier.restore_original_topology()
+modified_system = topology_changes.disconnect_line(system, line_idx=5)
 ```
 
-### 3. `static_security.py`
-Performs static security assessment through power flows.
+### Static Security Assessment
 
 ```python
-from static_security import StaticSecurityAssessor
+import static_security
 
-# Initialize assessor
-assessor = StaticSecurityAssessor(sim68)
+# Run power flow
+converged, results, solved_system = static_security.run_power_flow(system)
 
-# Run a power flow
-converged = assessor.run_power_flow()
+# Calculate line loadings
+line_loadings = static_security.calculate_line_loadings(solved_system)
 
 # Calculate overload index
-overload_index = assessor.calculate_overload_index()
-
-# Full assessment
-results = assessor.assess_static_security()
+overload_idx, line_indices = static_security.calculate_overload_index(solved_system, p=2)
 ```
 
-### 4. `small_signal_stability.py`
-Analyzes small-signal stability through eigenvalue analysis.
+### Small-Signal Stability Analysis
 
 ```python
-from small_signal_stability import SmallSignalStabilityAnalyzer
+import small_signal_stability
 
-# Initialize analyzer
-analyzer = SmallSignalStabilityAnalyzer(sim68)
-
-# Linearize system
-success = analyzer.linearize_system()
-
-# Compute eigenvalues
-eigenvalues = analyzer.compute_eigenvalues()
-
-# Identify oscillatory modes
-modes = analyzer.identify_modes(freq_min=0.25, freq_max=1.0)
-
-# Full assessment
-results = analyzer.assess_small_signal_stability(min_damping=0.03)
+# Perform small-signal assessment
+assessment = small_signal_stability.perform_small_signal_assessment(system, damping_threshold=3.0)
 ```
 
-### 5. `voltage_stability.py`
-Assesses voltage stability through time-domain simulation.
+### Transient Stability Analysis
 
 ```python
-from voltage_stability import VoltageStabilityAnalyzer
+import transient_stability
+import fault_injection
 
-# Initialize analyzer
-analyzer = VoltageStabilityAnalyzer(sim68)
+# Create a system with a fault
+faulted_system = fault_injection.apply_bus_fault(system, bus_idx=0)
 
-# Run time-domain simulation
-sim_results = analyzer.run_time_domain_simulation()
-
-# Check voltage criteria
-criteria_results = analyzer.check_voltage_criteria(
-    sim_results, v_min=0.8, v_max=1.1, violation_duration=0.5
+# Perform transient stability assessment
+assessment = transient_stability.perform_transient_stability_assessment(
+    faulted_system, t_end=5.0, tsi_threshold=10.0
 )
-
-# Full assessment
-results = analyzer.assess_voltage_stability()
 ```
 
-### 6. `transient_stability.py`
-Performs transient stability analysis.
+### Generating Labeled Data
 
 ```python
-from transient_stability import TransientStabilityAnalyzer
+import data_labeling
 
-# Initialize analyzer
-analyzer = TransientStabilityAnalyzer(sim68)
+# Initialize the labeler
+labeler = data_labeling.StabilityLabeler(output_dir='./stability_data')
 
-# Apply a fault
-analyzer.apply_fault('line_trip', 'LINE_1', start_time=1.0, duration=0.1)
+# Load a system
+labeler.load_system('ieee68')
 
-# Run simulation
-sim_results = analyzer.run_simulation(duration=10.0)
+# Generate a labeled dataset
+data = labeler.generate_labeled_dataset(n_scenarios=100)
 
-# Calculate TSI
-tsi = analyzer.calculate_transient_stability_index()
-
-# Full assessment
-results = analyzer.assess_transient_stability(tsi_threshold=10)
-```
-
-### 7. `fault_injection.py`
-Injects various types of faults into the system.
-
-```python
-from fault_injection import FaultInjector
-
-# Initialize injector
-injector = FaultInjector(sim68)
-
-# Apply line trip
-injector.apply_line_trip('LINE_1')
-
-# Apply generator trip
-injector.apply_generator_trip('GEN_1')
-
-# Apply cascading failure
-injector.apply_cascading_failure()
-
-# Clear all faults
-injector.clear_all_faults()
-```
-
-### 8. `data_labeling.py`
-Labels system states based on stability criteria.
-
-```python
-from data_labeling import DataLabeler
-
-# Initialize labeler
-labeler = DataLabeler(sim68)
-
-# Assess static security
-static_label, static_details = labeler.assess_static_security()
-
-# Assess small signal stability
-ss_label, ss_details = labeler.assess_small_signal_stability()
-
-# Assess voltage stability
-voltage_label, voltage_details = labeler.assess_voltage_stability()
-
-# Assess transient stability
-transient_label, transient_details = labeler.assess_transient_stability()
-
-# Comprehensive assessment
-overall_label, overall_details = labeler.assess_overall_stability()
-
-# Get stability DataFrame
-df = labeler.get_stability_dataframe()
-
-# Export results
-labeler.export_results("stability_results.json")
+# Get statistics
+stats = labeler.get_stability_statistics()
+print(stats)
 ```
 
 ## Stability Criteria
 
-The modules implement the following specific criteria for stability assessment:
+The framework implements the following stability criteria:
 
-1. **Transient Stability**: 
-   - System is considered transiently insecure if the TSI is less than 10%
-   - TSI = ((360 - delta_max) / (360 + delta_max)) * 100%
-   - where delta_max is the maximum angular separation between any two rotor angles
+- **Transient Stability**: A system is considered transiently insecure if the TSI (Transient Stability Index) is less than 10%. 
+  - TSI = (360-δ_max)/(360+δ_max)*100%, where δ_max is the maximum angular separation between any two rotor angles.
 
-2. **Small-signal Stability**:
-   - 3% damping ratio requirement for inter-area oscillation modes
-   - Frequency range of interest: 0.25-1.0 Hz
+- **Small-Signal Stability**: A system is considered small-signal stable if the damping ratio of inter-area oscillation modes (0.25-1.0 Hz) is at least 3%.
 
-3. **Voltage Stability**:
-   - System is insecure if any bus voltage deviates from 0.8-1.1 pu for more than 0.5 seconds
+- **Voltage Stability**: A system is considered voltage unstable if any bus voltage deviates from the range of 0.8 pu to 1.1 pu for more than 0.5 seconds.
 
-4. **Static Security**:
-   - Based on overload index: f_x = sum(w_i * (S_mean,i / S_max,i)^p)
-   - Where S_mean,i and S_max,i are the average and maximum apparent power flows
+- **Static Security**: The system is statically secure if the overload index is within acceptable limits and there are no overloaded lines.
+  - Overload index: f_x = sum(wf_i * (S_mean,i / S_max,i)^p) for all lines
 
-## Complete Example
+## Dependencies
 
-Here's a complete workflow combining all modules:
+- ANDES: For power system modeling and simulation
+- NumPy and Pandas: For numerical computations and data handling
+- Matplotlib: For visualization
+- Other scientific Python packages
 
-```python
-from load_ieee_systems import IEEESystemLoader
-from fault_injection import FaultInjector
-from data_labeling import DataLabeler
+## License
 
-# Load system
-loader = IEEESystemLoader()
-sim = loader.load_ieee68()
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-# Inject fault
-injector = FaultInjector(sim)
-injector.apply_line_trip('LINE_1')
+## References
 
-# Perform comprehensive assessment
-labeler = DataLabeler(sim)
-overall_label, overall_details = labeler.assess_overall_stability()
-
-# Export results
-results = labeler.export_results()
-print(f"Overall stability: {overall_label} - {overall_details}")
-```
-
-## Acknowledgments
-
-- [Dynawo](https://dynawo.github.io/) for the simulation framework
-- RTE (Réseau de Transport d'Électricité) for developing Dynawo
+- Liu, Z., et al. (2018). Accurate Power Swing-Based Algorithm for Transient Stability Assessment.
+- Genc, I., et al. (2010). Decision trees for dynamic security assessment.
+- Liu, H., et al. (2013). Systematic approach for dynamic security assessment.
+- Sevilla, F., et al. (2015). Static security assessment using artificial neural networks.
