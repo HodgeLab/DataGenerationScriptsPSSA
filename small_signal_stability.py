@@ -1,325 +1,323 @@
 """
-Module for performing small-signal stability assessment in Dynawo.
+Module for performing small-signal stability analysis in ANDES.
 """
 
-import dynawo
+import logging
 import numpy as np
 import pandas as pd
-from scipy import signal
+from copy import deepcopy
+import matplotlib.pyplot as plt
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class SmallSignalStabilityAnalyzer:
-    """Class to perform small-signal stability analysis in Dynawo power system models."""
+def run_small_signal_analysis(system):
+    """
+    Perform small-signal stability analysis on an ANDES system.
     
-    def __init__(self, simulation):
-        """
-        Initialize the small-signal stability analyzer.
+    Args:
+        system (andes.System): ANDES system object with a solved power flow
         
-        Args:
-            simulation: A Dynawo simulation object
-        """
-        self.simulation = simulation
-        self.network = simulation.get_network()
-        self.results = None
-        self.modes = None
-    
-    def linearize_system(self):
-        """
-        Linearize the system around the current operating point.
+    Returns:
+        bool: True if system is small-signal stable, False otherwise
+        dict: Small-signal analysis results
+    """
+    try:
+        # Create a deep copy to avoid modifying the original system
+        system_copy = deepcopy(system)
         
-        Returns:
-            True if linearization was successful, False otherwise
-        """
-        print("Linearizing system around current operating point...")
+        # Initialize and run power flow if not already run
+        if not hasattr(system_copy, 'f') or not hasattr(system_copy.f, 'Bus'):
+            logger.info("Running power flow before small-signal stability analysis")
+            system_copy.PFlow.run()
+            
+            if not system_copy.PFlow.converged:
+                logger.error("Power flow did not converge, cannot proceed with small-signal analysis")
+                return False, {'error': 'Power flow did not converge'}
         
-        try:
-            # Create a linearization solver
-            linearizer = dynawo.LinearizationSolver(self.simulation)
+        # Run eigenvalue analysis
+        logger.info("Running small-signal stability analysis")
+        
+        # Initialize small-signal module
+        system_copy.SSSA.init()
+        
+        # Set up small-signal computation options
+        system_copy.SSSA.config.eigs = True     # compute eigenvalues
+        system_copy.SSSA.config.part_factor = 1 # compute participation factors
+        
+        # Run the small-signal analysis
+        system_copy.SSSA.run()
+        
+        # Extract results
+        eigenvalues = system_copy.SSSA.eigenvalues
+        damping_ratios = system_copy.SSSA.damping
+        frequencies = system_copy.SSSA.freq
+        participation_factors = system_copy.SSSA.pf
+        state_names = system_copy.SSSA.state_names if hasattr(system_copy.SSSA, 'state_names') else None
+        
+        # Organize eigenvalue results
+        eigenvalue_results = []
+        
+        for i in range(len(eigenvalues)):
+            eig_value = eigenvalues[i]
+            damping = damping_ratios[i] * 100  # Convert to percentage
+            freq = frequencies[i]
             
-            # Set solver options
-            linearizer.set_tolerance(1e-6)
-            
-            # Run the linearization
-            success = linearizer.solve()
-            
-            if success:
-                print("System linearized successfully")
-                self.state_matrix = linearizer.get_state_matrix()
-                return True
-            else:
-                print("Linearization failed")
-                return False
+            # Get the top participating states if available
+            top_states = {}
+            if participation_factors is not None and state_names is not None:
+                # Get participation factors for this eigenvalue
+                pf_for_this_eig = participation_factors[:, i]
                 
-        except Exception as e:
-            print(f"Error during linearization: {str(e)}")
-            return False
-    
-    def compute_eigenvalues(self):
-        """
-        Compute eigenvalues of the state matrix.
-        
-        Returns:
-            NumPy array of complex eigenvalues
-        """
-        print("Computing eigenvalues...")
-        
-        # Linearize system if not already done
-        if not hasattr(self, 'state_matrix'):
-            success = self.linearize_system()
-            if not success:
-                print("Cannot compute eigenvalues - linearization failed")
-                return None
-        
-        # Compute eigenvalues and eigenvectors
-        eigenvalues, eigenvectors = np.linalg.eig(self.state_matrix)
-        
-        # Store results
-        self.eigenvalues = eigenvalues
-        self.eigenvectors = eigenvectors
-        
-        print(f"Computed {len(eigenvalues)} eigenvalues")
-        return eigenvalues
-    
-    def identify_modes(self, freq_min=0.25, freq_max=1.0):
-        """
-        Identify electromechanical oscillation modes.
-        
-        Args:
-            freq_min: Minimum frequency of interest (Hz)
-            freq_max: Maximum frequency of interest (Hz)
-            
-        Returns:
-            DataFrame containing the identified modes
-        """
-        # Compute eigenvalues if not already done
-        if not hasattr(self, 'eigenvalues'):
-            self.compute_eigenvalues()
-            if self.eigenvalues is None:
-                return None
-        
-        modes = []
-        
-        # Convert eigenvalues to damping and frequency
-        for i, eig in enumerate(self.eigenvalues):
-            if eig.imag != 0:  # Only consider oscillatory modes
-                freq = abs(eig.imag) / (2 * np.pi)  # Frequency in Hz
-                damping = -eig.real / np.sqrt(eig.real**2 + eig.imag**2)
+                # Sort by participation factor and get top 3
+                top_indices = np.argsort(-np.abs(pf_for_this_eig))[:3]
                 
-                # Check if the mode is in the frequency range of interest
-                if freq_min <= freq <= freq_max:
-                    modes.append({
-                        'mode_idx': i,
-                        'eigenvalue_real': eig.real,
-                        'eigenvalue_imag': eig.imag,
-                        'frequency_hz': freq,
-                        'damping_ratio': damping,
-                        'time_constant': -1/eig.real if eig.real < 0 else float('inf')
-                    })
-        
-        # Create DataFrame and sort by damping ratio
-        self.modes = pd.DataFrame(modes).sort_values(by='damping_ratio')
-        
-        print(f"Identified {len(self.modes)} electromechanical oscillation modes")
-        return self.modes
-    
-    def check_damping_criterion(self, min_damping=0.03):
-        """
-        Check if all modes meet the minimum damping criterion.
-        
-        Args:
-            min_damping: Minimum acceptable damping ratio
+                for idx in top_indices:
+                    if idx < len(state_names):
+                        state_name = state_names[idx]
+                        pf_value = abs(pf_for_this_eig[idx])
+                        top_states[state_name] = pf_value
             
-        Returns:
-            DataFrame containing poorly damped modes
-        """
-        # Identify modes if not already done
-        if self.modes is None:
-            self.identify_modes()
-            if self.modes is None:
-                return None
+            eigenvalue_results.append({
+                'eigenvalue_idx': i,
+                'real_part': eig_value.real,
+                'imag_part': eig_value.imag,
+                'frequency_hz': freq,
+                'damping_ratio_percent': damping,
+                'is_stable': eig_value.real < 0,
+                'top_participating_states': top_states
+            })
         
-        # Filter modes that don't meet the damping criterion
-        poorly_damped = self.modes[self.modes['damping_ratio'] < min_damping]
+        # Convert to DataFrame for easier manipulation
+        eigenvalue_df = pd.DataFrame(eigenvalue_results)
         
-        if len(poorly_damped) > 0:
-            print(f"Found {len(poorly_damped)} poorly damped modes (damping < {min_damping})")
-        else:
-            print(f"All modes have damping ratio >= {min_damping}")
+        # Focus on inter-area oscillation modes (0.25-1.0 Hz)
+        inter_area_modes = eigenvalue_df[
+            (eigenvalue_df['frequency_hz'] >= 0.25) & 
+            (eigenvalue_df['frequency_hz'] <= 1.0)
+        ]
         
-        return poorly_damped
-    
-    def get_participation_factors(self):
-        """
-        Calculate participation factors for each state in each mode.
+        # Check if the system satisfies the 3% damping ratio criterion for inter-area modes
+        min_damping_ratio = float('inf') if len(inter_area_modes) == 0 else inter_area_modes['damping_ratio_percent'].min()
+        is_stable = min_damping_ratio >= 3.0
         
-        Returns:
-            Dictionary mapping mode indices to state participation factors
-        """
-        # Compute eigenvalues if not already done
-        if not hasattr(self, 'eigenvalues') or not hasattr(self, 'eigenvectors'):
-            self.compute_eigenvalues()
-            if self.eigenvalues is None:
-                return None
+        # Identify poorly damped modes
+        poorly_damped_modes = inter_area_modes[inter_area_modes['damping_ratio_percent'] < 3.0]
         
-        # Get left eigenvectors
-        left_eigenvectors = np.linalg.inv(self.eigenvectors).T
-        
-        # Calculate participation factors
-        participation = {}
-        
-        for i in range(len(self.eigenvalues)):
-            # Calculate participation factors for this mode
-            p_factors = np.abs(np.multiply(self.eigenvectors[:, i], left_eigenvectors[:, i]))
-            
-            # Normalize to sum to 1
-            p_factors = p_factors / np.sum(p_factors)
-            
-            participation[i] = p_factors
-        
-        return participation
-    
-    def perform_time_domain_validation(self, duration=20.0, time_step=0.01):
-        """
-        Perform time-domain simulation to validate the small-signal stability analysis.
-        
-        Args:
-            duration: Simulation duration (seconds)
-            time_step: Simulation time step (seconds)
-            
-        Returns:
-            Dictionary containing simulation results
-        """
-        print("Performing time-domain validation...")
-        
-        # Set simulation parameters
-        self.simulation.set_duration(duration)
-        self.simulation.set_time_step(time_step)
-        
-        # Run the simulation
-        result = self.simulation.run()
-        
-        if result:
-            print("Time-domain simulation completed successfully")
-            
-            # Extract generator rotor angles
-            generators = self.network.get_generators()
-            gen_angles = {}
-            
-            for gen in generators:
-                gen_id = gen.get_id()
-                if hasattr(gen, 'get_rotor_angle'):
-                    gen_angles[gen_id] = np.array(gen.get_variable_values('rotor_angle'))
-            
-            # Perform FFT analysis to identify frequencies
-            fft_results = {}
-            if len(gen_angles) > 0:
-                for gen_id, angles in gen_angles.items():
-                    # Detrend data
-                    detrended = signal.detrend(angles)
-                    
-                    # Calculate FFT
-                    n = len(detrended)
-                    fft = np.fft.fft(detrended)
-                    freq = np.fft.fftfreq(n, d=time_step)
-                    
-                    # Get positive frequencies only
-                    positive_idx = np.where(freq > 0)[0]
-                    positive_freq = freq[positive_idx]
-                    positive_fft = np.abs(fft[positive_idx])
-                    
-                    # Store results
-                    fft_results[gen_id] = {
-                        'frequencies': positive_freq,
-                        'magnitudes': positive_fft
-                    }
-            
-            return {
-                'success': True,
-                'generator_angles': gen_angles,
-                'fft_results': fft_results
-            }
-        else:
-            print("Time-domain simulation failed")
-            return {'success': False}
-    
-    def assess_small_signal_stability(self, min_damping=0.03, freq_min=0.25, freq_max=1.0):
-        """
-        Perform a complete small-signal stability assessment.
-        
-        Args:
-            min_damping: Minimum acceptable damping ratio
-            freq_min: Minimum frequency of interest (Hz)
-            freq_max: Maximum frequency of interest (Hz)
-            
-        Returns:
-            Dictionary containing assessment results
-        """
-        print("Performing small-signal stability assessment...")
-        
-        # Linearize the system
-        linearized = self.linearize_system()
-        if not linearized:
-            return {'success': False, 'stable': False, 'message': 'Linearization failed'}
-        
-        # Compute eigenvalues
-        eigenvalues = self.compute_eigenvalues()
-        
-        # Check if any eigenvalues have positive real parts (unstable)
-        unstable_eigenvalues = [ev for ev in eigenvalues if ev.real > 0]
-        
-        if unstable_eigenvalues:
-            print(f"System is small-signal unstable with {len(unstable_eigenvalues)} unstable eigenvalues")
-            return {
-                'success': True,
-                'stable': False,
-                'message': f'System has {len(unstable_eigenvalues)} unstable eigenvalues',
-                'eigenvalues': eigenvalues,
-                'unstable_eigenvalues': unstable_eigenvalues
-            }
-        
-        # Identify oscillatory modes
-        self.identify_modes(freq_min=freq_min, freq_max=freq_max)
-        
-        # Check damping criterion
-        poorly_damped = self.check_damping_criterion(min_damping=min_damping)
-        
-        # Get participation factors for poorly damped modes
-        participation = None
-        if len(poorly_damped) > 0:
-            participation = self.get_participation_factors()
-            
-            # Filter to only include poorly damped modes
-            participation = {mode_idx: factors for mode_idx, factors in participation.items() 
-                            if mode_idx in poorly_damped['mode_idx'].values}
-        
-        # Determine if the system is stable according to the criteria
-        is_stable = len(poorly_damped) == 0
-        
-        # Compile results
-        assessment = {
-            'success': True,
-            'stable': is_stable,
-            'eigenvalues': eigenvalues,
-            'modes': self.modes,
-            'poorly_damped_modes': poorly_damped,
-            'participation_factors': participation,
-            'min_damping_criterion': min_damping
+        # Create a summary of results
+        results = {
+            'is_stable': is_stable,
+            'min_damping_ratio': min_damping_ratio if min_damping_ratio != float('inf') else None,
+            'eigenvalues': eigenvalue_df.to_dict('records'),
+            'inter_area_modes_count': len(inter_area_modes),
+            'poorly_damped_modes_count': len(poorly_damped_modes),
+            'poorly_damped_modes': poorly_damped_modes.to_dict('records') if len(poorly_damped_modes) > 0 else []
         }
         
+        # Log summary of results
         if is_stable:
-            print("System is small-signal stable (all modes meet damping criterion)")
+            logger.info(f"System is small-signal stable with minimum damping ratio of {min_damping_ratio:.2f}%")
         else:
-            print(f"System is small-signal unstable (found {len(poorly_damped)} poorly damped modes)")
+            logger.warning(f"System is small-signal unstable with minimum damping ratio of {min_damping_ratio:.2f}%")
         
-        return assessment
+        return is_stable, results
+    
+    except Exception as e:
+        logger.error(f"Failed to run small-signal stability analysis: {str(e)}")
+        raise
 
+def plot_eigenvalues(eigenvalue_results, min_damping_line=3.0, filename=None):
+    """
+    Plot the eigenvalues from small-signal stability analysis.
+    
+    Args:
+        eigenvalue_results (dict): Results from small-signal stability analysis
+        min_damping_line (float): Minimum required damping ratio in percentage
+        filename (str, optional): If provided, save the plot to this file
+        
+    Returns:
+        matplotlib.figure.Figure: Figure object with the eigenvalue plot
+    """
+    try:
+        # Extract eigenvalues
+        eigenvalues = np.array([(e['real_part'], e['imag_part']) for e in eigenvalue_results['eigenvalues']])
+        damping_ratios = np.array([e['damping_ratio_percent'] for e in eigenvalue_results['eigenvalues']])
+        frequencies = np.array([e['frequency_hz'] for e in eigenvalue_results['eigenvalues']])
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Plot all eigenvalues
+        scatter = ax.scatter(eigenvalues[:, 0], eigenvalues[:, 1], 
+                             c=damping_ratios, cmap='jet', s=30, alpha=0.7)
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Damping Ratio (%)')
+        
+        # Plot constant damping lines
+        r_max = max(abs(np.min(eigenvalues[:, 0])), abs(np.max(eigenvalues[:, 0])))
+        r_max = max(r_max, 2)  # Ensure a minimum range
+        y_max = max(abs(np.min(eigenvalues[:, 1])), abs(np.max(eigenvalues[:, 1])))
+        y_max = max(y_max, 10)  # Ensure a minimum range
+        
+        # Add min damping ratio line
+        zeta = min_damping_line / 100.0
+        theta = np.arccos(zeta)
+        x_line = np.linspace(-r_max, 0, 100)
+        y_line_upper = np.tan(theta) * (-x_line)
+        y_line_lower = -np.tan(theta) * (-x_line)
+        
+        ax.plot(x_line, y_line_upper, 'r--', linewidth=1.5, label=f'{min_damping_line}% Damping Ratio')
+        ax.plot(x_line, y_line_lower, 'r--', linewidth=1.5)
+        
+        # Highlight inter-area modes
+        inter_area_indices = [i for i, f in enumerate(frequencies) if 0.25 <= f <= 1.0]
+        if inter_area_indices:
+            ax.scatter(eigenvalues[inter_area_indices, 0], eigenvalues[inter_area_indices, 1], 
+                       s=100, facecolors='none', edgecolors='r', linewidth=2, label='Inter-area Modes')
+        
+        # Add labels and title
+        ax.set_xlabel('Real Part (1/s)')
+        ax.set_ylabel('Imaginary Part (rad/s)')
+        ax.set_title('Eigenvalue Plot with Damping Ratio Lines')
+        
+        # Add grid and legend
+        ax.grid(True)
+        ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        ax.axvline(x=0, color='k', linestyle='-', alpha=0.3)
+        ax.legend()
+        
+        # Set equal aspect ratio and limits
+        ax.set_xlim([-r_max, r_max/4])
+        ax.set_ylim([-y_max, y_max])
+        
+        # Save if filename is provided
+        if filename:
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            logger.info(f"Eigenvalue plot saved to {filename}")
+        
+        return fig
+    
+    except Exception as e:
+        logger.error(f"Failed to plot eigenvalues: {str(e)}")
+        raise
 
-# Example usage
+def identify_critical_modes(eigenvalue_results, damping_threshold=3.0):
+    """
+    Identify critical modes with low damping that may cause stability issues.
+    
+    Args:
+        eigenvalue_results (dict): Results from small-signal stability analysis
+        damping_threshold (float): Threshold for identifying critical modes (percentage)
+        
+    Returns:
+        pd.DataFrame: DataFrame with critical modes information
+    """
+    try:
+        # Extract eigenvalues as DataFrame
+        eigenvalue_df = pd.DataFrame(eigenvalue_results['eigenvalues'])
+        
+        # Filter for oscillatory modes (non-zero frequency)
+        oscillatory_modes = eigenvalue_df[eigenvalue_df['frequency_hz'] > 0]
+        
+        # Sort by damping ratio (ascending)
+        sorted_modes = oscillatory_modes.sort_values('damping_ratio_percent')
+        
+        # Identify critical modes with damping below threshold
+        critical_modes = sorted_modes[sorted_modes['damping_ratio_percent'] < damping_threshold]
+        
+        # Categorize modes by frequency range
+        def categorize_mode(freq):
+            if freq < 0.25:
+                return 'Local'
+            elif freq <= 1.0:
+                return 'Inter-area'
+            elif freq <= 2.0:
+                return 'Control'
+            else:
+                return 'High-frequency'
+        
+        critical_modes['mode_type'] = critical_modes['frequency_hz'].apply(categorize_mode)
+        
+        # Log summary of critical modes
+        if len(critical_modes) > 0:
+            logger.warning(f"Identified {len(critical_modes)} critical modes with damping ratio below {damping_threshold}%")
+            
+            # Count by mode type
+            mode_type_counts = critical_modes['mode_type'].value_counts()
+            for mode_type, count in mode_type_counts.items():
+                logger.warning(f"  - {count} {mode_type} modes")
+        else:
+            logger.info(f"No critical modes found with damping ratio below {damping_threshold}%")
+        
+        return critical_modes
+    
+    except Exception as e:
+        logger.error(f"Failed to identify critical modes: {str(e)}")
+        raise
+
+def perform_small_signal_assessment(system, damping_threshold=3.0):
+    """
+    Perform comprehensive small-signal stability assessment.
+    
+    Args:
+        system (andes.System): ANDES system object with a solved power flow
+        damping_threshold (float): Threshold for identifying critical modes (percentage)
+        
+    Returns:
+        dict: Dictionary with assessment results
+    """
+    try:
+        # Run small-signal analysis
+        logger.info("Performing small-signal stability assessment")
+        is_stable, results = run_small_signal_analysis(system)
+        
+        # Identify critical modes
+        critical_modes = identify_critical_modes(results, damping_threshold)
+        
+        # Prepare assessment results
+        assessment_results = {
+            'is_stable': is_stable,
+            'min_damping_ratio': results['min_damping_ratio'],
+            'critical_modes_count': len(critical_modes),
+            'critical_modes': critical_modes.to_dict('records') if len(critical_modes) > 0 else [],
+            'inter_area_modes_count': results['inter_area_modes_count'],
+            'poorly_damped_modes_count': results['poorly_damped_modes_count'],
+            'eigenvalue_stats': {
+                'total_count': len(results['eigenvalues']),
+                'unstable_count': sum(1 for e in results['eigenvalues'] if not e['is_stable']),
+                'stable_count': sum(1 for e in results['eigenvalues'] if e['is_stable'])
+            }
+        }
+        
+        return assessment_results
+    
+    except Exception as e:
+        logger.error(f"Failed to perform small-signal stability assessment: {str(e)}")
+        raise
+
 if __name__ == "__main__":
-    # This requires a simulation object to be created first
-    # from load_ieee_systems import IEEESystemLoader
-    # loader = IEEESystemLoader()
-    # sim = loader.load_ieee68()
-    # analyzer = SmallSignalStabilityAnalyzer(sim)
-    # results = analyzer.assess_small_signal_stability()
-    pass
+    # Example usage
+    import load_ieee_system
+    
+    # Load IEEE 68-bus system
+    system = load_ieee_system.load_ieee68()
+    
+    # Run power flow (required before small-signal analysis)
+    system.PFlow.run()
+    
+    if system.PFlow.converged:
+        # Perform small-signal assessment
+        assessment = perform_small_signal_assessment(system, damping_threshold=3.0)
+        
+        # Print summary
+        print("\nSmall-Signal Stability Assessment Summary:")
+        print(f"Is stable: {assessment['is_stable']}")
+        print(f"Minimum damping ratio: {assessment['min_damping_ratio']:.2f}%")
+        print(f"Number of critical modes: {assessment['critical_modes_count']}")
+        print(f"Number of inter-area modes: {assessment['inter_area_modes_count']}")
+        print(f"Eigenvalue statistics: {assessment['eigenvalue_stats']}")
+    else:
+        print("Power flow did not converge, cannot perform small-signal analysis")
